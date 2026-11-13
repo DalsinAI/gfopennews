@@ -40,6 +40,44 @@ static size_t packet(uint8_t *out, const uint8_t set[16], const char type[16],
     return 64 + bl;
 }
 
+#define T_MAIN "PAR 2.0\0Main\0\0\0\0"
+#define T_DESC "PAR 2.0\0FileDesc"
+#define T_IFSC "PAR 2.0\0IFSC\0\0\0\0"
+#define T_RECV "PAR 2.0\0RecvSlic"
+
+static size_t mk_main(uint8_t *out, const uint8_t set[16], uint64_t slice,
+                      const uint8_t (*ids)[16], uint32_t n)
+{
+    static uint8_t b[12 + 16 * 8];
+    uint32_t i;
+    put64(b, slice);
+    put32(b + 8, n);
+    for (i = 0; i < n; i++)
+        memcpy(b + 12 + 16 * i, ids[i], 16);
+    return packet(out, set, T_MAIN, b, 12 + 16 * n);
+}
+
+static size_t mk_desc(uint8_t *out, const uint8_t set[16], const uint8_t id[16],
+                      uint64_t length, const char *name)
+{
+    static uint8_t b[56 + 64];
+    size_t nl = strlen(name), bl = 56 + ((nl + 3) & ~(size_t)3);
+    memset(b, 0, sizeof(b));
+    memcpy(b, id, 16);
+    put64(b + 48, length);
+    memcpy(b + 56, name, nl);
+    return packet(out, set, T_DESC, b, bl);
+}
+
+static int write_file(const char *path, const uint8_t *d, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    fwrite(d, 1, n, f);
+    fclose(f);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     char h[33], path[512];
@@ -176,6 +214,136 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s/no-such.par2", dir);
         CHECK_EQ(nn_par2_load(&p, path), NK_EIO);
         nn_par2_free(&p);
+    }
+    /* crafted packets (Kochanski's review of #4) */
+    {
+        static uint8_t buf[8192];
+        uint8_t set[16], other[16], ids[2][16], b[64];
+        size_t n;
+        NNPar2 p;
+        snprintf(path, sizeof(path), "%s/c.par2", dir);
+        memset(set, 0x41, 16);
+        memset(other, 0x42, 16);
+        memset(ids[0], 0x43, 16);
+        memset(ids[1], 0x43, 16);
+
+        /* an IFSC shorter than the file's slices: no over-read in verify */
+        n = mk_main(buf, set, 4, ids, 1);
+        n += mk_desc(buf + n, set, ids[0], 400, "short.bin");
+        memset(b, 0, sizeof(b));
+        memcpy(b, ids[0], 16);
+        n += packet(buf + n, set, T_IFSC, b, 16 + 20);
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+        CHECK_EQ(p.files[0].nslices, 100);
+        CHECK_EQ(p.files[0].nifsc, 1);
+        {
+            char fp[600];
+            static uint8_t z[400];
+            snprintf(fp, sizeof(fp), "%s/short.bin", dir);
+            CHECK(write_file(fp, z, sizeof(z)));
+            CHECK(nn_par2_verify(&p, dir) >= 99);   /* slices past the IFSC are unknown */
+        }
+        nn_par2_free(&p);
+
+        /* a main packet naming the same file twice is refused, and what
+         * came before it is freed once */
+        n = mk_desc(buf, set, ids[0], 8, "dup.bin");
+        memset(b, 0, sizeof(b));
+        memcpy(b, ids[0], 16);
+        n += packet(buf + n, set, T_IFSC, b, 16 + 40);
+        n += mk_main(buf + n, set, 4, ids, 2);
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_EPROTO);
+        CHECK_EQ(p.have_main, 0);
+        nn_par2_free(&p);
+
+        /* a slice over NN_PAR2_MAXSLICE, and a set over NN_PAR2_MAXSLICES */
+        n = mk_main(buf, set, (uint64_t)NN_PAR2_MAXSLICE * 2, ids, 1);
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_EPROTO);
+        nn_par2_free(&p);
+        n = mk_main(buf, set, 4, ids, 1);
+        n += mk_desc(buf + n, set, ids[0], 4ull * NN_PAR2_MAXSLICES + 4, "huge.bin");
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_EPROTO);
+        CHECK(p.too_big);
+        CHECK_EQ(nn_par2_verify(&p, dir), 0xffffffffu);
+        CHECK_EQ(nn_par2_repair(&p, dir), NK_EPROTO);
+        nn_par2_free(&p);
+        {
+            /* a length whose slice count does not fit 32 bits */
+            n = mk_main(buf, set, 4, ids, 1);
+            n += mk_desc(buf + n, set, ids[0], 0xfffffffffffffff0ull, "wrap.bin");
+            CHECK(write_file(path, buf, n));
+            memset(&p, 0, sizeof(p));
+            CHECK_EQ(nn_par2_load(&p, path), NK_EPROTO);
+            nn_par2_free(&p);
+        }
+
+        /* recovery packets: a short one before main, one of another set
+         * before main, a short one after main: none kept */
+        memset(b, 0, sizeof(b));
+        put32(b, 1);
+        n = packet(buf, set, T_RECV, b, 4 + 4);
+        put32(b, 2);
+        n += packet(buf + n, other, T_RECV, b, 4 + 8);
+        n += mk_main(buf + n, set, 8, ids, 1);
+        n += mk_desc(buf + n, set, ids[0], 8, "r.bin");
+        put32(b, 3);
+        n += packet(buf + n, set, T_RECV, b, 4 + 4);
+        put32(b, 4);
+        n += packet(buf + n, set, T_RECV, b, 4 + 8);   /* the right size: kept */
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+        CHECK_EQ(p.nrec, 1);
+        CHECK(p.nrec == 1 && p.rec[0].exponent == 4 && p.rec[0].len == 8);
+        nn_par2_free(&p);
+
+        /* a description named ".." is not taken */
+        n = mk_main(buf, set, 4, ids, 1);
+        n += mk_desc(buf + n, set, ids[0], 4, "..");
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+        CHECK(!p.files[0].name[0]);
+        CHECK_EQ(nn_par2_repair(&p, dir), NK_EPROTO);
+        nn_par2_free(&p);
+
+        /* a rebuilt slice whose MD5 is wrong (bad recovery data) is not
+         * written, and repair says so */
+        {
+            static const uint8_t data[4] = { 'a', 'b', 'c', 'd' };
+            char fp[600];
+            NNMd5 m;
+            n = mk_main(buf, set, 4, ids, 1);
+            n += mk_desc(buf + n, set, ids[0], 4, "md5.bin");
+            memset(b, 0, sizeof(b));
+            memcpy(b, ids[0], 16);
+            nn_md5_init(&m);
+            nn_md5_update(&m, data, 4);
+            nn_md5_final(&m, b + 16);
+            put32(b + 32, nk_crc32_update(0, data, 4));
+            n += packet(buf + n, set, T_IFSC, b, 36);
+            memset(b, 0, sizeof(b));
+            put32(b, 1);
+            memcpy(b + 4, "zzzz", 4);
+            n += packet(buf + n, set, T_RECV, b, 8);
+            CHECK(write_file(path, buf, n));
+            snprintf(fp, sizeof(fp), "%s/md5.bin", dir);
+            remove(fp);
+            memset(&p, 0, sizeof(p));
+            CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+            CHECK_EQ(nn_par2_verify(&p, dir), 1);
+            CHECK_EQ(nn_par2_repair(&p, dir), NK_EPROTO);
+            CHECK_EQ(p.files[0].damaged, 1);
+            nn_par2_free(&p);
+        }
     }
     TEST_DONE();
 }
