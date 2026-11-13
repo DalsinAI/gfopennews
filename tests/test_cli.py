@@ -22,7 +22,7 @@ fails = 0
 
 def run(*args, ok=True):
     global fails
-    base = [cli, "--server", "127.0.0.1", "--port", port, "--user", "dale",
+    base = [cli, "--server", "127.0.0.1", "--port", port, "--allow-plain-auth", "--user", "dale",
             "--pass-env", "NEWS_PW", "--cache", cache, "--newsrc", rc]
     p = subprocess.run(base + list(args), capture_output=True, text=True, env=env, timeout=30)
     if (p.returncode == 0) != ok:
@@ -57,14 +57,18 @@ out = run("unread")
 check(out.strip() == "comp.sys.amiga.misc\t1 unread", "unread: %r" % out)
 run("headers", "no.such.group", ok=False)
 # wrong password is refused
-p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--user", "dale",
+p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--allow-plain-auth", "--user", "dale",
                     "--pass-env", "BAD_PW", "groups"], capture_output=True, text=True, env=env,
                    timeout=30)
 check(p.returncode != 0 and "481" in p.stderr, "bad password refused: %r" % p.stderr)
 # through the SOCKS5 proxy
 p = subprocess.run([cli, "--server", "localhost", "--port", port, "--socks", "127.0.0.1:" + socks,
-                    "--user", "dale", "--pass-env", "NEWS_PW", "groups"],
+                    "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW", "groups"],
                    capture_output=True, text=True, env=env, timeout=30)
 check(p.returncode == 0 and "comp.sys.amiga.misc" in p.stdout, "via SOCKS5: %r" % (p.stdout + p.stderr))
+# no TLS on the host build: AUTHINFO needs --allow-plain-auth
+p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--user", "dale",
+                    "--pass-env", "NEWS_PW", "groups"], capture_output=True, text=True, env=env, timeout=30)
+check(p.returncode == 2 and "without TLS" in p.stderr, "plain auth refused: %d %r" % (p.returncode, p.stderr))
 print("cli tests: %d failed" % fails)
 sys.exit(1 if fails else 0)
