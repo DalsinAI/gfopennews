@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 #define NN_Q_MAXSERVERS 8
+#define NN_Q_MAXSEGS    1000000u   /* segments in one file; more is refused */
 
 enum {                       /* file states */
     NN_QF_QUEUED = 0,
@@ -45,6 +46,9 @@ void     nn_q_close(NNQueue *q);
 /* Adds every file of an NZB (par2 files last). Answers files added. */
 int      nn_q_add_nzb(NNQueue *q, const NNNzb *nzb);
 size_t   nn_q_files(const NNQueue *q);
+/* files a crash left half-added (fewer segments than the NZB said), dropped
+ * when the queue was opened: add the NZB again */
+size_t   nn_q_dropped(const NNQueue *q);
 int      nn_q_info(const NNQueue *q, size_t index, NNQFileInfo *out);
 int      nn_q_pause(NNQueue *q, uint32_t id, int pause);
 int      nn_q_remove(NNQueue *q, uint32_t id);

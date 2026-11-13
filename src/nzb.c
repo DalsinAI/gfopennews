@@ -145,9 +145,18 @@ static int next_tok(X *x, Tok *t)
         return -1;
     }
     {
-        const char *gt = (const char *)memchr(s, '>', (size_t)(x->e - s));
-        const char *n;
-        if (!gt)
+        const char *gt, *n;
+        char q = 0;
+        /* the closing '>', not one inside a quoted attribute value */
+        for (gt = s + 1; gt < x->e; gt++) {
+            if (q) {
+                if (*gt == q) q = 0;
+            } else if (*gt == '"' || *gt == '\'') {
+                q = *gt;
+            } else if (*gt == '>')
+                break;
+        }
+        if (gt >= x->e)
             return -1;
         x->s = gt + 1;
         if (s[1] == '?' || s[1] == '!')
