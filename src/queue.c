@@ -60,6 +60,7 @@ struct NNQueue {
     QConn      conns[32];
     int        nconns, nservers;
     long       limit;            /* -1 = none */
+    size_t     dropped;          /* half-added files dropped at open */
 };
 
 static QFile *find(NNQueue *q, uint32_t id)
@@ -172,7 +173,7 @@ static int replay(void *u, const char *r, size_t len)
     case 'F':
         if (f || !(p = word(p, e, &a)) || !(p = word(p, e, &b)) || p >= e || *p != ' ')
             return 0;
-        if ((size_t)(e - p - 1) >= sizeof(tmp) || a > 1000000)
+        if ((size_t)(e - p - 1) >= sizeof(tmp) || a > NN_Q_MAXSEGS)
             return 0;
         memcpy(tmp, p + 1, (size_t)(e - p - 1));
         tmp[e - p - 1] = 0;
@@ -209,7 +210,8 @@ static int replay(void *u, const char *r, size_t len)
             f->state = a ? NN_QF_PAUSED : NN_QF_QUEUED;
         return 0;
     case 'C':
-        if (f && (p = word(p, e, &a)) && p < e && *p == ' ') {
+        if (f && (p = word(p, e, &a)) && p < e && *p == ' ' &&
+            a > NN_QF_PAUSED && a <= NN_QF_INCOMPLETE) {
             f->state = (int)a;
             free(f->path);
             if ((size_t)(e - p - 1) < sizeof(tmp)) {
@@ -277,16 +279,35 @@ NNQueue *nn_q_open(const char *dir, const char *out_dir, int nservers, int *err)
     free(path);
     if (!q->j)
         goto fail;
+    /* a crash in nn_q_add_nzb can leave a file with fewer S records than
+     * segments: it could never finish, so it goes (add the NZB again) */
+    for (i = 0; i < q->n; i++) {
+        QFile *f = &q->f[i];
+        if (!f->removed && f->nset < f->nsegs) {
+            rec(q, "R %lu", (unsigned long)f->id);
+            free_file(f);
+            f->removed = 1;
+            q->dropped++;
+        }
+    }
+    if (q->dropped)
+        nk_journal_sync(q->j);
     /* unfinished files: open their part files and believe them over D */
     for (i = 0; i < q->n; i++) {
         QFile *f = &q->f[i];
         uint32_t k;
         if (f->removed || f->state > NN_QF_PAUSED || !f->size)
             continue;
-        if (open_pf(q, f) != NK_OK)
+        if (open_pf(q, f) != NK_OK) {
+            /* no part file: nothing it says is done can be believed */
+            for (k = 0; k < f->nset; k++)
+                if (f->segs[k].state == S_DONE)
+                    f->segs[k].state = S_TODO;
+            f->ndone = 0;
             continue;
+        }
         for (k = 0; k < f->nset; k++)
-            if (f->segs[k].state == S_DONE && !nn_pf_have(f->pf, f->segs[k].number)) {
+            if (f->segs[k].state == S_DONE && !nn_pf_have(f->pf, k + 1)) {
                 f->segs[k].state = S_TODO;
                 f->ndone--;
             }
@@ -343,7 +364,7 @@ int nn_q_add_nzb(NNQueue *q, const NNNzb *nzb)
             par = is_par2(name, &vol);
             if ((pass == 0 && par) || (pass == 1 && (!par || vol)) || (pass == 2 && (!par || !vol)))
                 continue;
-            if (!nf->nsegs)
+            if (!nf->nsegs || nf->nsegs > NN_Q_MAXSEGS)
                 continue;
             for (k = 0; k < nf->nsegs; k++)
                 bytes += nf->segs[k].bytes;
@@ -368,6 +389,11 @@ int nn_q_add_nzb(NNQueue *q, const NNNzb *nzb)
         }
     nk_journal_sync(q->j);
     return added;
+}
+
+size_t nn_q_dropped(const NNQueue *q)
+{
+    return q->dropped;
 }
 
 size_t nn_q_files(const NNQueue *q)
@@ -412,6 +438,11 @@ int nn_q_remove(NNQueue *q, uint32_t id)
     QFile *f = find(q, id);
     if (!f || f->inflight) return NK_EARG;
     rec(q, "R %lu", (unsigned long)id);
+    /* the half-built download goes too (a finished file stays) */
+    if (!f->pf && f->size && f->state != NN_QF_DONE)
+        open_pf(q, f);
+    nn_pf_discard(f->pf);
+    f->pf = 0;
     free_file(f);
     f->removed = 1;
     return nk_journal_sync(q->j);
@@ -527,7 +558,7 @@ static void job_done(void *u, int code, const char *text, size_t tl, int err)
     f->inflight--;
     ys = nn_ye_finish(&jb->y);
     if (code == 222 && err == NK_OK && ys == NN_YE_OK && jb->y.got && !jb->write_err &&
-        nn_pf_commit(f->pf, s->number, jb->y.begin - 1, jb->y.got, jb->y.crc) == NK_OK) {
+        nn_pf_commit(f->pf, jb->si + 1, jb->y.begin - 1, jb->y.got, jb->y.crc) == NK_OK) {
         if ((jb->y.have & NN_YE_HAVE_CRC) &&
             (!(jb->y.have & NN_YE_HAVE_PART) || !(jb->y.have & NN_YE_HAVE_PCRC) ||
              jb->y.crc32 != jb->y.pcrc32 || f->nsegs == 1))
