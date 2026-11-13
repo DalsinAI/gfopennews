@@ -12,7 +12,28 @@ set(NETKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopennetkit" CACHE PATH "gfopenn
 add_subdirectory(${NETKIT_DIR} netkit)
 
 add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c
-  src/decode.c src/partfile.c src/nzb.c src/queue.c src/md5.c src/par2.c src/path.c src/cli.c src/plat_posix.c src/ui_model.c src/openlayout.c src/gfcss_parse.c src/gfcss_values.c src/gfcss_select.c src/openlayout_css.c src/ui_window.c)
+  src/decode.c src/partfile.c src/nzb.c src/queue.c src/md5.c src/par2.c src/path.c src/ui_model.c)
+target_include_directories(gfopennews_core PUBLIC include)
+target_link_libraries(gfopennews_core PUBLIC gfopennetkit)
+
+# The reader window needs GFOpenLayout's UI (olui) built for the host: its
+# sources from a gfopenlayout checkout (default: next to this one).
+set(GFOPENLAYOUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopenlayout" CACHE PATH "gfopenlayout checkout")
+if(EXISTS ${GFOPENLAYOUT_DIR}/include/gfopenlayout_ui.h)
+  set(OL ${GFOPENLAYOUT_DIR})
+  add_library(olui_host STATIC
+    ${OL}/src/openlayout.c ${OL}/src/gfcss_parse.c ${OL}/src/gfcss_values.c ${OL}/src/gfcss_select.c
+    ${OL}/src/openlayout_css.c ${OL}/ui/olui.c ${OL}/ui/olui_css.c ${OL}/ui/olui_markup.c ${OL}/ui/olui_theme_none.c)
+  target_include_directories(olui_host PUBLIC ${OL}/include PRIVATE ${OL}/ui ${OL}/src)
+  add_library(gfopennews_ui STATIC src/ui_window.c)
+  target_link_libraries(gfopennews_ui PUBLIC gfopennews_core olui_host)
+  set(HAVE_OLUI 1)
+else()
+  message(STATUS "gfopenlayout not found at ${GFOPENLAYOUT_DIR}: the reader window and its test are left out")
+endif()
+
+add_executable(gfopennews-cli src/cli.c src/plat_posix.c)
+target_compile_definitions(gfopennews-cli PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(gfopennews-cli gfopennews_core)
 
 enable_testing()

@@ -29,7 +29,7 @@ Rules: commits are authored and committed by SacredTrees; draw through GFOpenLay
 
     cmake -S . -B build -DNETKIT_DIR=../gfopennetkit && cmake --build build && ctest --test-dir build
 
-For the Amiga, `./build-amiga.sh` (the os32-gcc16-open6 stove; NETKIT, TLS and KEYS name the gfopennetkit, gfopentls and gfopenkeys checkouts) builds `build-amiga/GFOpenNews`, which takes the same options and commands. Without gfopenkeys headers it builds with no keystore, and so no AUTHINFO.
+For the Amiga, `./build-cli-amiga.sh` (the os32-gcc16-open6 stove; NETKIT, TLS and KEYS name the gfopennetkit, gfopentls and gfopenkeys checkouts) builds `build-amiga/GFOpenNews`, which takes the same options and commands. Without gfopenkeys headers it builds with no keystore, and so no AUTHINFO.
 
 `cli_fake_server` runs the CLI against gfopennetkit's fake NNTP server, directly and through its fake SOCKS5 proxy; no test needs the internet. The PAR2 tests use sets written by `tests/par2make.py`, a separate small PAR2 writer in Python, so the C reader is checked against code that does not share its mistakes (it was also checked by hand against par2cmdline: each repairs the other's sets).
 With a gfopenlayout checkout next to this one (or `-DGFOPENLAYOUT_DIR=...`), the reader window and its test are built too: `test_ui_window` drives the window with olui's own pointer and key calls.
