@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: DalsinAI/gfopennetkit
-          ref: 5ea50ad1e3d7db68b611ed283e4f291fc522df34
+          ref: 2fc096687d3d80f63df605400c503b248ee4c159
           path: deps/gfopennetkit
       - run: cmake -S . -B build -DNETKIT_DIR=$GITHUB_WORKSPACE/deps/gfopennetkit
       - run: cmake --build build -j2

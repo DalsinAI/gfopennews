@@ -6,8 +6,11 @@
  *   gfopennews-cli [options] article GROUP NUMBER
  *   gfopennews-cli [options] unread                     (needs --newsrc)
  *   gfopennews-cli [options] mark GROUP LOW[-HIGH]      (needs --newsrc)
+ *   gfopennews-cli [options] nzb FILE.nzb               (queue it and fetch)
+ *   gfopennews-cli [options] resume                     (carry on the queue)
  * options: --server HOST --port N --user U --pass-env VAR --socks HOST:PORT
- *          --newsrc FILE --cache DIR
+ *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
+ *          --conns N (per server) --limit N (stop after N segments)
  * The password comes from an environment variable for now; with
  * gfopenkeys.library it comes from the keystore (entry nntp/HOST/USER).
  *
@@ -21,6 +24,7 @@
 #include "gfopennews/nntp.h"
 #include "gfopennews/newsrc.h"
 #include "gfopennews/overview.h"
+#include "gfopennews/queue.h"
 
 typedef struct {
     int  code;
@@ -108,22 +112,178 @@ static int print_over(void *u, const NNOver *ov)
     return 0;
 }
 
+
+static void usage(void);
+static const char *nn_cli_server;
+static int nn_cli_port;
+
+static NNClient *open_server(const char *server, int port, const char *socks,
+                             const char *user, const char *passenv)
+{
+    NKTransport t;
+    NKConn *conn;
+    NNClient *c;
+    Reply r;
+    char line[600];
+    if (socks) {
+        char host[256];
+        const char *colon = strrchr(socks, ':');
+        NKSocks5 s;
+        int k;
+        if (!colon || (size_t)(colon - socks) >= sizeof(host)) { usage(); return 0; }
+        memcpy(host, socks, (size_t)(colon - socks));
+        host[colon - socks] = 0;
+        if (nk_posix_tcp(host, (uint16_t)atoi(colon + 1), &t) != NK_OK) {
+            fprintf(stderr, "cannot reach proxy %s\n", socks);
+            return 0;
+        }
+        nk_socks5_init(&s, server, (uint16_t)port, 0, 0);
+        while ((k = nk_socks5_step(&s, &t)) == NK_WOULDBLOCK) {
+            struct pollfd p;
+            p.fd = t.fd(t.ctx);
+            p.events = POLLIN;
+            poll(&p, 1, 1000);
+        }
+        if (k != 1) {
+            fprintf(stderr, "proxy: %s\n", nk_strerror(k));
+            nk_transport_close(&t);
+            return 0;
+        }
+    } else if (nk_posix_tcp(server, (uint16_t)port, &t) != NK_OK) {
+        fprintf(stderr, "cannot reach %s:%d\n", server, port);
+        return 0;
+    }
+    conn = nk_conn_new(0, t, 0);
+    memset(&r, 0, sizeof(r));
+    c = nn_new(conn, on_done, &r);
+    if (!c || wait_all(c) != NK_OK || r.code / 100 != 2) {
+        fprintf(stderr, "no greeting: %d %s\n", r.code, r.text);
+        nn_free(c);
+        return 0;
+    }
+    cmd(c, "MODE READER", NN_SINGLE, 0, 0, &r);
+    if (user) {
+        const char *pw = passenv ? getenv(passenv) : 0;
+        snprintf(line, sizeof(line), "AUTHINFO USER %s", user);
+        if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
+        if (r.code == 381) {
+            if (!pw) { fprintf(stderr, "password needed (--pass-env)\n"); goto fail; }
+            snprintf(line, sizeof(line), "AUTHINFO PASS %s", pw);
+            if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
+            memset(line, 0, sizeof(line));
+        }
+        if (r.code != 281) { fprintf(stderr, "login refused: %d %s\n", r.code, r.text); goto fail; }
+    }
+    return c;
+fail:
+    nn_free(c);
+    return 0;
+}
+
+static const char *state_name(int st)
+{
+    switch (st) {
+    case NN_QF_QUEUED: return "queued";
+    case NN_QF_PAUSED: return "paused";
+    case NN_QF_DONE: return "done";
+    case NN_QF_BADCRC: return "bad-crc";
+    default: return "incomplete";
+    }
+}
+
+/* nzb FILE | resume: fetch over `conns` connections per server */
+static int run_queue(NNClient *first, int argc, char **argv, const char *server2,
+                     const char *socks, const char *user, const char *passenv,
+                     const char *out_dir, const char *queue_dir, long limit, int conns)
+{
+    NNQueue *q;
+    NNClient *cl[16];
+    int ncl = 0, nservers = server2 ? 2 : 1, e, k, status = 0;
+    size_t i;
+    NNQFileInfo fi;
+    uint32_t tick = 0;
+    q = nn_q_open(queue_dir ? queue_dir : out_dir, out_dir, nservers, &e);
+    if (!q) {
+        fprintf(stderr, "cannot open the queue: %s\n", nk_strerror(e));
+        nn_free(first);
+        return 1;
+    }
+    if (!strcmp(argv[0], "nzb")) {
+        NNNzb nzb;
+        if (argc < 2 || nn_nzb_load(&nzb, argv[1]) != NK_OK) {
+            fprintf(stderr, "cannot read the NZB\n");
+            nn_free(first);
+            nn_q_close(q);
+            return 1;
+        }
+        printf("added %d files\n", nn_q_add_nzb(q, &nzb));
+        nn_nzb_free(&nzb);
+    }
+    cl[ncl] = first;
+    nn_q_attach(q, cl[ncl++], 0, 2);
+    for (k = 1; k < conns && ncl < 16; k++)
+        if ((cl[ncl] = open_server(nn_cli_server, nn_cli_port, socks, user, passenv)) != 0)
+            nn_q_attach(q, cl[ncl++], 0, 2);
+    if (server2) {
+        char host[256];
+        const char *colon = strrchr(server2, ':');
+        size_t hl = colon ? (size_t)(colon - server2) : strlen(server2);
+        if (hl >= sizeof(host)) hl = sizeof(host) - 1;
+        memcpy(host, server2, hl);
+        host[hl] = 0;
+        for (k = 0; k < conns && ncl < 16; k++)
+            if ((cl[ncl] = open_server(host, colon ? atoi(colon + 1) : 119, socks, user, passenv)) != 0)
+                nn_q_attach(q, cl[ncl++], 1, 2);
+    }
+    if (limit >= 0)
+        nn_q_limit(q, limit);
+    while (nn_q_step(q)) {
+        struct pollfd p[16];
+        for (k = 0; k < ncl; k++) {
+            p[k].fd = nk_conn_fd(nn_conn(cl[k]));
+            p[k].events = POLLIN | (nk_conn_outq(nn_conn(cl[k])) ? POLLOUT : 0);
+        }
+        if (!ncl)
+            break;
+        poll(p, (nfds_t)ncl, 1000);
+        tick += 10;
+        for (k = 0; k < ncl; k++)
+            if (nn_pump(cl[k], tick) != NK_OK) {
+                nn_q_detach(q, cl[k]);
+                nn_free(cl[k]);
+                cl[k--] = cl[--ncl];
+            }
+    }
+    for (i = 0; nn_q_info(q, i, &fi); i++) {
+        printf("%s\t%s\t%lu/%lu\t%s\n", fi.name, state_name(fi.state), (unsigned long)fi.done,
+               (unsigned long)fi.nsegs, fi.path ? fi.path : "-");
+        if (fi.state == NN_QF_BADCRC || fi.state == NN_QF_INCOMPLETE)
+            status = 3;
+    }
+    nn_q_compact(q);
+    nn_q_close(q);
+    for (k = 0; k < ncl; k++)
+        nn_free(cl[k]);
+    return status;
+}
+
 static void usage(void)
 {
     fputs("usage: gfopennews-cli [--server H] [--port N] [--user U] [--pass-env VAR]\n"
           "       [--socks H:P] [--newsrc FILE] [--cache DIR]\n"
-          "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n",
+          "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
+          "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
+          "       | nzb FILE.nzb | resume\n",
           stderr);
 }
 
 int main(int argc, char **argv)
 {
     const char *server = "localhost", *user = 0, *passenv = 0, *socks = 0;
-    const char *newsrc = 0, *cache = ".";
-    int port = 119, i, rc_dirty = 0, status = 0;
+    const char *newsrc = 0, *cache = ".", *server2 = 0, *out_dir = ".", *queue_dir = 0;
+    int port = 119, i, rc_dirty = 0, status = 0, conns = 2;
+    long limit = -1;
     NNNewsrc rc;
-    NKTransport t;
-    NKConn *conn;
     NNClient *c;
     Reply r;
     char line[600];
@@ -137,9 +297,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--socks")) socks = argv[++i];
         else if (!strcmp(argv[i], "--newsrc")) newsrc = argv[++i];
         else if (!strcmp(argv[i], "--cache")) cache = argv[++i];
+        else if (!strcmp(argv[i], "--server2")) server2 = argv[++i];
+        else if (!strcmp(argv[i], "--out")) out_dir = argv[++i];
+        else if (!strcmp(argv[i], "--queue")) queue_dir = argv[++i];
+        else if (!strcmp(argv[i], "--limit")) limit = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--conns")) conns = atoi(argv[++i]);
         else { usage(); return 2; }
     }
     if (i >= argc) { usage(); return 2; }
+    nn_cli_server = server;
+    nn_cli_port = port;
     nn_rc_init(&rc);
     if (newsrc && nn_rc_load(&rc, newsrc) != NK_OK) {
         fprintf(stderr, "cannot read %s\n", newsrc);
@@ -169,52 +336,16 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (socks) {
-        char host[256];
-        const char *colon = strrchr(socks, ':');
-        NKSocks5 s;
-        int k;
-        if (!colon || (size_t)(colon - socks) >= sizeof(host)) { usage(); return 2; }
-        memcpy(host, socks, (size_t)(colon - socks));
-        host[colon - socks] = 0;
-        if (nk_posix_tcp(host, (uint16_t)atoi(colon + 1), &t) != NK_OK) {
-            fprintf(stderr, "cannot reach proxy %s\n", socks);
-            return 1;
-        }
-        nk_socks5_init(&s, server, (uint16_t)port, 0, 0);
-        while ((k = nk_socks5_step(&s, &t)) == NK_WOULDBLOCK) {
-            struct pollfd p;
-            p.fd = t.fd(t.ctx);
-            p.events = POLLIN;
-            poll(&p, 1, 1000);
-        }
-        if (k != 1) {
-            fprintf(stderr, "proxy: %s\n", nk_strerror(k));
-            return 1;
-        }
-    } else if (nk_posix_tcp(server, (uint16_t)port, &t) != NK_OK) {
-        fprintf(stderr, "cannot reach %s:%d\n", server, port);
+    c = open_server(server, port, socks, user, passenv);
+    if (!c) {
+        nn_rc_free(&rc);
         return 1;
     }
-    conn = nk_conn_new(0, t, 0);
-    memset(&r, 0, sizeof(r));
-    c = nn_new(conn, on_done, &r);
-    if (!c || wait_all(c) != NK_OK || r.code / 100 != 2) {
-        fprintf(stderr, "no greeting: %d %s\n", r.code, r.text);
-        return 1;
-    }
-    cmd(c, "MODE READER", NN_SINGLE, 0, 0, &r);
-    if (user) {
-        const char *pw = passenv ? getenv(passenv) : 0;
-        snprintf(line, sizeof(line), "AUTHINFO USER %s", user);
-        if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
-        if (r.code == 381) {
-            if (!pw) { fprintf(stderr, "password needed (--pass-env)\n"); goto fail; }
-            snprintf(line, sizeof(line), "AUTHINFO PASS %s", pw);
-            if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
-            memset(line, 0, sizeof(line));
-        }
-        if (r.code != 281) { fprintf(stderr, "login refused: %d %s\n", r.code, r.text); goto fail; }
+    if (!strcmp(argv[i], "nzb") || !strcmp(argv[i], "resume")) {
+        status = run_queue(c, argc - i, argv + i, server2, socks, user, passenv,
+                           out_dir, queue_dir, limit, conns);
+        nn_rc_free(&rc);
+        return status;
     }
 
     if (!strcmp(argv[i], "groups") || !strcmp(argv[i], "unread")) {
