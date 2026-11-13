@@ -64,7 +64,8 @@ def make(outbase, slice_size, nrec, paths):
         md5_16k = hashlib.md5(data[:16384]).digest()
         fid = hashlib.md5(md5_16k + struct.pack("<Q", len(data)) + name).digest()
         files.append({"id": fid, "data": data, "name": name, "md5_16k": md5_16k})
-    files.sort(key=lambda f: f["id"])
+    # par2cmdline orders the IDs as little-endian 128-bit numbers
+    files.sort(key=lambda f: f["id"][::-1])
     main_body = struct.pack("<QI", slice_size, len(files)) + b"".join(f["id"] for f in files)
     set_id = hashlib.md5(main_body).digest()
     common = [packet(set_id, b"PAR 2.0\0Main\0\0\0\0", main_body)]

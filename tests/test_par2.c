@@ -343,7 +343,55 @@ int main(int argc, char **argv)
             CHECK_EQ(nn_par2_repair(&p, dir), NK_EPROTO);
             CHECK_EQ(p.files[0].damaged, 1);
             nn_par2_free(&p);
+            /* the same with a damaged file there: it is left exactly as it
+             * was, with no .repair and no .1 */
+            {
+                char rp[700], kp[700], got[8] = { 0 };
+                FILE *t;
+                snprintf(rp, sizeof(rp), "%s.repair", fp);
+                snprintf(kp, sizeof(kp), "%s.1", fp);
+                remove(kp);
+                CHECK(write_file(fp, (const uint8_t *)"abXd", 4));
+                memset(&p, 0, sizeof(p));
+                CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+                CHECK_EQ(nn_par2_verify(&p, dir), 1);
+                CHECK_EQ(nn_par2_repair(&p, dir), NK_EPROTO);
+                nn_par2_free(&p);
+                t = fopen(fp, "rb");
+                CHECK(t != 0);
+                if (t) { CHECK_EQ(fread(got, 1, 7, t), 4); fclose(t); }
+                CHECK(!strcmp(got, "abXd"));
+                t = fopen(rp, "rb");
+                CHECK(t == 0);
+                if (t) fclose(t);
+                t = fopen(kp, "rb");
+                CHECK(t == 0);
+                if (t) fclose(t);
+                /* good data, then the file grows after verify: repair
+                 * cuts only what verify flagged, so it stays as it is */
+                CHECK(write_file(fp, data, 4));
+                memset(&p, 0, sizeof(p));
+                CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+                CHECK_EQ(nn_par2_verify(&p, dir), 0);
+                CHECK(write_file(fp, (const uint8_t *)"abcdzz", 6));
+                CHECK_EQ(nn_par2_repair(&p, dir), NK_OK);
+                nn_par2_free(&p);
+                t = fopen(fp, "rb");
+                memset(got, 0, sizeof(got));
+                if (t) { CHECK_EQ(fread(got, 1, 7, t), 6); fclose(t); }
+                remove(fp);
+            }
         }
+
+        /* more damage than one repair takes: refused before any work */
+        n = mk_main(buf, set, 4, ids, 1);
+        n += mk_desc(buf + n, set, ids[0], 4ull * (NN_PAR2_MAXMISS + 1), "many.bin");
+        CHECK(write_file(path, buf, n));
+        memset(&p, 0, sizeof(p));
+        CHECK_EQ(nn_par2_load(&p, path), NK_OK);
+        CHECK_EQ(nn_par2_verify(&p, dir), NN_PAR2_MAXMISS + 1);
+        CHECK_EQ(nn_par2_repair(&p, dir), NK_ETOOLONG);
+        nn_par2_free(&p);
     }
     TEST_DONE();
 }

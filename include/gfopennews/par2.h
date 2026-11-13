@@ -55,6 +55,7 @@ typedef struct NNPar2Rec {
 
 #define NN_PAR2_MAXSLICE  (64ul << 20)  /* bytes in a slice we take */
 #define NN_PAR2_MAXSLICES 32768u        /* input slices in a set (the spec's limit) */
+#define NN_PAR2_MAXMISS   4096u         /* damaged slices one repair takes (memory: 2 * n^2 bytes) */
 
 typedef struct NNPar2 {
     uint8_t     set_id[16];
@@ -84,9 +85,13 @@ uint32_t nn_par2_vol_blocks(const char *name);
  * fewest blocks; sets pick[i] to 1. Answers the blocks picked, or less
  * than need when there are not enough. */
 uint32_t nn_par2_pick(const uint32_t *blocks, size_t n, uint32_t need, uint8_t *pick);
-/* Rebuilds every damaged slice from the recovery blocks loaded and
- * rewrites the files in `dir` (a damaged file is rewritten whole, to its
- * PAR2 length). NK_OK, NK_EARG when there are too few blocks, NK_EIO. */
+/* Rebuilds every damaged slice from the recovery blocks loaded. A damaged
+ * file is rebuilt whole (to its PAR2 length) as <name>.repair, which takes
+ * the name once every slice is in and checks; the original stays as
+ * <name>.1 (or the next free number). Files verify found too long are cut.
+ * NK_OK, NK_EARG when there are too few blocks, NK_ETOOLONG over
+ * NN_PAR2_MAXMISS damaged slices, NK_EPROTO when a rebuilt slice is wrong,
+ * NK_EIO. */
 int  nn_par2_repair(NNPar2 *p, const char *dir);
 
 #ifdef __cplusplus

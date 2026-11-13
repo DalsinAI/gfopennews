@@ -150,14 +150,19 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
         {
             NNPar2File *nf = (NNPar2File *)calloc(n ? n : 1, sizeof(NNPar2File));
             if (!nf) return NK_ENOMEM;
+            /* the same file twice is a broken packet (checked on a sorted
+             * copy; the slices follow the main packet's own order, which
+             * par2cmdline sorts with the ID as a little-endian number) */
             for (i = 0; i < n; i++)
                 memcpy(nf[i].id, body + 12 + i * 16, 16);
             qsort(nf, n, sizeof(NNPar2File), id_cmp);
             for (i = 1; i < n; i++)
                 if (!memcmp(nf[i - 1].id, nf[i].id, 16)) {
-                    free(nf);      /* the same file twice: a broken packet */
+                    free(nf);
                     return 0;
                 }
+            for (i = 0; i < n; i++)
+                memcpy(nf[i].id, body + 12 + i * 16, 16);
             for (i = 0; i < n; i++) {
                 NNPar2File *old = file_by_id(p, nf[i].id);
                 if (old) {
@@ -518,6 +523,8 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
         ret = NK_OK;
         goto truncate;
     }
+    if (nmiss > NN_PAR2_MAXMISS)
+        return NK_ETOOLONG;          /* the matrix would be too big (nmiss^2) */
     if (nmiss > p->nrec)
         return NK_EARG;
     /* verify read <name>.part where there was no <name>: so does repair */
@@ -626,72 +633,110 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
                 if (acc[c][k]) acc[r][k] ^= nn_gf_mul(m, acc[c][k]);
         }
     }
-    /* acc[c] is now missing slice miss[c]: write them back */
-    for (i = 0, c = 0; i < p->nfiles; i++) {
+    /* acc[c] is now missing slice miss[c]. Each damaged file is rebuilt as
+     * <name>.repair (its good bytes copied, the rebuilt slices written in)
+     * and takes the name only when every slice is in: a crash or a full
+     * disk leaves the original as it was. The original stays as <name>.1. */
+    for (i = 0; i < p->nfiles; i++) {
         NNPar2File *f = &p->files[i];
-        char *path;
-        FILE *fp;
+        char *path, *rp;
+        FILE *in, *fp;
         uint32_t s;
+        uint64_t at;
+        int werr = 0;
         if (!f->damaged) continue;
         path = join(dir, f->name);
-        if (!path) goto out;
-        fp = fopen(path, "r+b");
-        if (!fp) fp = fopen(path, "w+b");
-        free(path);
-        if (!fp) { ret = NK_EIO; goto out; }
-        for (s = 0; s < f->nslices; s++) {
-            uint64_t at = (uint64_t)s * p->slice, n;
+        rp = path ? (char *)malloc(strlen(path) + 8) : 0;
+        if (!rp) { free(path); goto out; }
+        strcpy(rp, path);
+        strcat(rp, ".repair");
+        fp = fopen(rp, "wb");
+        if (!fp) { free(rp); free(path); ret = NK_EIO; goto out; }
+        /* the original's bytes up to the PAR2 length, then zeros (no
+         * seeking past the end on AmigaDOS) */
+        in = fopen(path, "rb");
+        for (at = 0; at < f->length && !werr;) {
+            size_t kk = f->length - at > p->slice ? (size_t)p->slice : (size_t)(f->length - at);
+            size_t got = in ? fread(buf, 1, kk, in) : 0;
+            if (got < kk) {
+                memset(buf + got, 0, kk - got);
+                if (in) { fclose(in); in = 0; }
+            }
+            if (fwrite(buf, 1, kk, fp) != kk) werr = 1;
+            at += kk;
+        }
+        if (in) fclose(in);
+        for (s = 0; s < f->nslices && !werr; s++) {
+            uint64_t n;
             size_t w;
+            at = (uint64_t)s * p->slice;
             if (!f->bad[s]) continue;
             for (c = 0; c < nmiss && miss[c] != f->first + s; c++)
                 ;
-            if (c == nmiss) { fclose(fp); ret = NK_EPROTO; goto out; }
+            if (c == nmiss) { werr = 2; break; }
             for (w = 0; w < words; w++) {
                 buf[2 * w] = (uint8_t)acc[c][w];
                 buf[2 * w + 1] = (uint8_t)(acc[c][w] >> 8);
             }
-            /* a rebuilt slice is written only when its MD5 is right */
+            /* a rebuilt slice is taken only when its MD5 is right */
             if (f->slice_md5 && s < f->nifsc) {
                 uint8_t d[16];
                 NNMd5 m;
                 nn_md5_init(&m);
                 nn_md5_update(&m, buf, (size_t)p->slice);
                 nn_md5_final(&m, d);
-                if (memcmp(d, f->slice_md5[s], 16)) {
-                    fclose(fp);
-                    ret = NK_EPROTO;
-                    goto out;
-                }
+                if (memcmp(d, f->slice_md5[s], 16)) { werr = 2; break; }
             }
             n = f->length - at < p->slice ? f->length - at : p->slice;
-            /* a missing file: fill up to here with zeros first (no seeking
-             * past the end on AmigaDOS); good slices are written below */
-            fseek(fp, 0, SEEK_END);
-            {
-                long end = ftell(fp);
-                static const uint8_t z[1024];
-                while (end >= 0 && (uint64_t)end < at) {
-                    size_t kk = at - (uint64_t)end > sizeof(z) ? sizeof(z) : (size_t)(at - (uint64_t)end);
-                    fwrite(z, 1, kk, fp);
-                    end += (long)kk;
-                }
-            }
-            if (fseek(fp, (long)at, SEEK_SET) != 0 || fwrite(buf, 1, (size_t)n, fp) != n) {
-                fclose(fp);
-                ret = NK_EIO;
-                goto out;
-            }
-            f->bad[s] = 0;
+            if (fseek(fp, (long)at, SEEK_SET) != 0 || fwrite(buf, 1, (size_t)n, fp) != n)
+                werr = 1;
         }
-        fclose(fp);
+        if (fclose(fp) != 0 && !werr) werr = 1;
+        if (!werr) {
+            /* the original goes aside as <name>.1 (or .2 ...), then the
+             * rebuilt file takes its name */
+            char *keep = (char *)malloc(strlen(path) + 4);
+            FILE *t = fopen(path, "rb");
+            int k, moved = 0;
+            if (t) {
+                fclose(t);
+                for (k = 1; keep && k <= 9 && !moved; k++) {
+                    FILE *x;
+                    sprintf(keep, "%s.%d", path, k);
+                    if ((x = fopen(keep, "rb")) != 0) { fclose(x); continue; }
+                    moved = rename(path, keep) == 0;
+                }
+                if (!moved) werr = 1;
+            }
+            if (!werr && rename(rp, path) != 0) {
+                if (moved) rename(keep, path);
+                werr = 1;
+            }
+            free(keep);
+        }
+        if (werr) {
+            remove(rp);
+            free(rp);
+            free(path);
+            ret = werr == 2 ? NK_EPROTO : NK_EIO;
+            goto out;
+        }
+        free(rp);
+        free(path);
+        for (s = 0; s < f->nslices; s++)
+            f->bad[s] = 0;
         f->damaged = 0;
+        f->too_long = 0;           /* cut to its length on the way */
     }
     ret = NK_OK;
 truncate:
     /* files longer than their PAR2 length are cut back */
     for (i = 0; i < p->nfiles && ret == NK_OK; i++) {
         NNPar2File *f = &p->files[i];
-        char *path = join(dir, f->name);
+        char *path;
+        if (!f->too_long)
+            continue;              /* only what verify found too long */
+        path = join(dir, f->name);
         FILE *fp = path ? fopen(path, "rb") : 0;
         long len = -1;
         if (fp) {
