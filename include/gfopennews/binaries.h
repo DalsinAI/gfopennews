@@ -133,6 +133,8 @@ int      nn_pf_finish(NNPartFile *pf);
 /* Final name actually used (a numbered one when the name was taken). */
 const char *nn_pf_final(const NNPartFile *pf);
 void     nn_pf_close(NNPartFile *pf);
+/* closes it and deletes the .part and .parts files (the download is dropped) */
+void     nn_pf_discard(NNPartFile *pf);
 
 #ifdef __cplusplus
 }

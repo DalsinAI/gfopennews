@@ -367,5 +367,44 @@ int main(int argc, char **argv)
         CHECK(!nn_bin_subject("bad (5/3)", name, sizeof(name), &p, &t));
         CHECK(!nn_bin_subject("\"..\" yEnc", name, sizeof(name), &p, &t) && name[0] == 0);
     }
+    /* a record whose data never reached the disk (power cut) is forgotten,
+     * and discard drops both files */
+    {
+        NNPartFile *pf;
+        FILE *f;
+        int e;
+        char dp[700], sp[700];
+        snprintf(path, sizeof(path), "%s/cut.bin", dir);
+        snprintf(dp, sizeof(dp), "%s.part", path);
+        snprintf(sp, sizeof(sp), "%s.parts", path);
+        remove(path); remove(dp); remove(sp);
+        pf = nn_pf_open(path, 10, 2, &e);
+        CHECK(pf != 0);
+        CHECK_EQ(nn_pf_write(pf, 1, 0, data, 5), NK_OK);
+        CHECK_EQ(nn_pf_write(pf, 2, 5, data + 5, 5), NK_OK);
+        nn_pf_close(pf);
+        f = fopen(dp, "wb");          /* the data file lost its second half */
+        CHECK(f != 0);
+        if (f) {
+            fwrite(data, 1, 5, f);
+            fclose(f);
+        }
+        pf = nn_pf_open(path, 10, 2, &e);
+        CHECK(pf != 0);
+        if (pf) {
+            CHECK(nn_pf_have(pf, 1) && !nn_pf_have(pf, 2));
+            CHECK_EQ(nn_pf_count(pf), 1);
+            CHECK_EQ(nn_pf_write(pf, 2, 5, data + 5, 5), NK_OK);
+            CHECK_EQ(nn_pf_count(pf), 2);
+            nn_pf_discard(pf);
+        }
+        f = fopen(dp, "rb");
+        CHECK(f == 0);
+        if (f) fclose(f);
+        f = fopen(sp, "rb");
+        CHECK(f == 0);
+        if (f) fclose(f);
+        nn_pf_discard(0);
+    }
     TEST_DONE();
 }

@@ -67,5 +67,17 @@ int main(void)
     CHECK(!nn_msgid_ok("a@b>\r\nQUIT"));
     CHECK(!nn_msgid_ok(""));
     CHECK(!nn_msgid_ok("<a@b>"));
+    /* a raw '>' inside a quoted attribute value is part of the value */
+    {
+        static const char gt[] =
+            "<nzb><file subject='a > b \"x.bin\"' poster=\"<p>\"><segments>"
+            "<segment bytes=\"1\" number=\"1\">x@y</segment></segments></file></nzb>";
+        CHECK_EQ(nn_nzb_parse(&n, S(gt)), NK_OK);
+        CHECK_EQ(n.nfiles, 1);
+        CHECK(n.nfiles == 1 && !strcmp(n.files[0].subject, "a > b \"x.bin\""));
+        CHECK(n.nfiles == 1 && !strcmp(n.files[0].poster, "<p>"));
+        CHECK(n.nfiles == 1 && n.files[0].nsegs == 1);
+        nn_nzb_free(&n);
+    }
     TEST_DONE();
 }
