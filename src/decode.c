@@ -48,6 +48,19 @@ static int kv_num(const char *l, size_t n, const char *key, uint64_t *v, int hex
     return 0;
 }
 
+void nn_bin_safe_name(char *name)
+{
+    /* never a path: keep only the last component */
+    char *sl = strrchr(name, '/'), *bs = strrchr(name, '\\'), *co = strrchr(name, ':');
+    char *cut = sl;
+    if (bs && (!cut || bs > cut)) cut = bs;
+    if (co && (!cut || co > cut)) cut = co;
+    if (cut)
+        memmove(name, cut + 1, strlen(cut + 1) + 1);
+    if (!strcmp(name, "..") || !strcmp(name, "."))
+        name[0] = 0;
+}
+
 static int starts(const char *l, size_t n, const char *p)
 {
     size_t k = strlen(p);
@@ -56,8 +69,17 @@ static int starts(const char *l, size_t n, const char *p)
 
 static void ye_out(NNYenc *y, const uint8_t *d, size_t n)
 {
-    if (!n || y->status == NN_YE_WRITE)
+    uint64_t room;
+    if (!n || y->status != NN_YE_OK)
         return;
+    /* never past the =ypart range (or the size, single-part): a part
+     * carrying too much would write over the next part's bytes, which are
+     * already held with their CRC */
+    room = y->end >= y->begin ? y->end - y->begin + 1 : 0;
+    if (y->got >= room || n > room - y->got) {
+        y->status = NN_YE_SIZE;
+        return;
+    }
     if (y->write && y->write(y->user, (y->begin ? y->begin - 1 : 0) + y->got, d, n) != 0) {
         y->status = NN_YE_WRITE;
         return;
@@ -102,6 +124,7 @@ void nn_ye_line(NNYenc *y, const char *l, size_t n)
                 i = sizeof(y->name) - 1;
             memcpy(y->name, nm, i);
             y->name[i] = 0;
+            nn_bin_safe_name(y->name);
         }
         y->status = NN_YE_OK;
         if (y->have & NN_YE_HAVE_PART) {
@@ -225,6 +248,7 @@ void nn_uu_line(NNUu *u, const char *l, size_t n)
             n = i + sizeof(u->name) - 1;
         memcpy(u->name, l + i, n - i);
         u->name[n - i] = 0;
+        nn_bin_safe_name(u->name);
         u->state = 1;
         return;
     }
@@ -371,16 +395,6 @@ int nn_bin_subject(const char *s, char *name, size_t cap, uint32_t *part, uint32
             name[l] = 0;
         }
     }
-    /* never a path: keep only the last component */
-    {
-        char *sl = strrchr(name, '/'), *bs = strrchr(name, '\\'), *co = strrchr(name, ':');
-        char *cut = sl;
-        if (bs && (!cut || bs > cut)) cut = bs;
-        if (co && (!cut || co > cut)) cut = co;
-        if (cut)
-            memmove(name, cut + 1, strlen(cut + 1) + 1);
-        if (!strcmp(name, "..") || !strcmp(name, "."))
-            name[0] = 0;
-    }
+    nn_bin_safe_name(name);
     return found;
 }

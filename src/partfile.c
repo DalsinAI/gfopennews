@@ -59,7 +59,7 @@ static int replay(void *u, const char *rec, size_t len)
         if (a != pf->size || b != pf->nparts)
             pf->header_bad = 1;
     } else if (sscanf(buf, "p %llu %llu %llu %lx", &a, &b, &c, &d) == 4) {
-        if (a <= 0xffffffffu && b + c <= pf->size)
+        if (a <= 0xffffffffu && c <= pf->size && b <= pf->size - c)
             mark(pf, (uint32_t)a, b, c, (uint32_t)d);
     } else if (sscanf(buf, "c %lx", &d) == 1) {
         pf->expect = (uint32_t)d;
@@ -74,8 +74,10 @@ NNPartFile *nn_pf_open(const char *final_path, uint64_t size, uint32_t nparts, i
     int e = NK_ENOMEM;
     NKJournalStats st;
     char rec[64];
-    if (!pf || !nparts)
+    if (!pf || !nparts || size >= NN_PF_MAX) {
+        if (pf) e = NK_EARG;
         goto fail;
+    }
     pf->size = size;
     pf->nparts = nparts;
     pf->final = cat(final_path, "");
