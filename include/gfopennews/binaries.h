@@ -122,6 +122,7 @@ int      nn_pf_write(NNPartFile *pf, uint32_t part, uint64_t offset,
                      const uint8_t *data, size_t len);
 /* For decoders that stream: begin, write pieces, then commit with the
  * part's CRC (nn_pf_commit checks that the pieces covered len bytes). */
+/* NK_EARG past the end, or over the range of a part already held */
 int      nn_pf_put(NNPartFile *pf, uint64_t offset, const uint8_t *data, size_t len);
 int      nn_pf_commit(NNPartFile *pf, uint32_t part, uint64_t offset, uint64_t len, uint32_t crc);
 int      nn_pf_have(const NNPartFile *pf, uint32_t part);

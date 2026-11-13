@@ -150,8 +150,14 @@ fail:
 
 int nn_pf_put(NNPartFile *pf, uint64_t offset, const uint8_t *data, size_t len)
 {
-    if (offset + len > pf->size)
+    uint32_t i;
+    if (offset > pf->size || len > pf->size - offset)
         return NK_EARG;
+    /* never over a part already held: an article that claims another
+     * one's range (a wrong post, a bad server) must not damage it */
+    for (i = 0; i < pf->count; i++)
+        if (offset < pf->held[i].off + pf->held[i].len && pf->held[i].off < offset + len)
+            return NK_EARG;
     /* AmigaDOS can't seek past the end: fill the gap with zeros */
     if (offset > pf->fsize) {
         static const uint8_t zero[4096];

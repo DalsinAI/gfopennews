@@ -72,6 +72,10 @@ check(r.returncode == 0 and "repaired: yes" in r.stdout, "repair: %d %r %r" % (r
 check(same(files), "files rebuilt byte for byte")
 check(not os.path.exists(os.path.join(work, "b b.dat.part")), ".part took its name")
 check(not os.path.exists(os.path.join(work, "b b.dat.parts")), ".parts list removed")
+# the damaged originals are kept as <name>.1; no .repair is left behind
+k = os.path.join(work, "a.bin.1")
+check(os.path.exists(k) and open(k, "rb").read()[1000:1100] == b"\0" * 100, "a.bin.1 is the damaged original")
+check(not any(n.endswith(".repair") for n in os.listdir(work)), "no .repair left: %r" % os.listdir(work))
 
 # too few blocks: says how many more
 files = fresh(2)

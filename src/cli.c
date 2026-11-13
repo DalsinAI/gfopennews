@@ -264,6 +264,9 @@ static int run_par2(const char *what, const char *index)
     }
     if (strcmp(what, "repair")) {
         status = 3;
+    } else if (bad > NN_PAR2_MAXMISS) {
+        printf("more damage than one repair takes (%lu)\n", (unsigned long)NN_PAR2_MAXMISS);
+        status = 3;
     } else if (bad > p.nrec) {
         printf("need %lu more recovery blocks\n", (unsigned long)(bad - p.nrec));
         status = 3;
@@ -309,6 +312,12 @@ static int queue_par2(NNQueue *q, const char *out_dir, int *asked)
     bad = nn_par2_verify(&p, out_dir);
     printf("par2: %lu damaged slices, %lu recovery blocks in\n", (unsigned long)bad,
            (unsigned long)p.nrec);
+    if (bad > NN_PAR2_MAXMISS) {
+        /* refused before anything more is fetched */
+        printf("par2: more damage than one repair takes (%lu)\n", (unsigned long)NN_PAR2_MAXMISS);
+        nn_par2_free(&p);
+        return 3;
+    }
     if (bad > p.nrec && !*asked) {
         for (i = 0; nn_q_info(q, i, &fi) && nv < 64; i++)
             if (fi.state == NN_QF_PAUSED && nn_par2_vol_blocks(fi.name)) {
