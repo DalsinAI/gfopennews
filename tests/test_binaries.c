@@ -223,6 +223,53 @@ int main(int argc, char **argv)
         nn_pf_close(pf);
         remove(tmp);
 
+        /* a part carrying more than its =ypart range must not write over
+         * the next part (Franklin's repro): part 2 "DEF" is held, then a
+         * part 1 for 1-3 brings 6 bytes */
+        {
+            static const uint8_t def[3] = { 'D', 'E', 'F' }, six[6] = { 'A', 'B', 'C', '0', '0', '0' };
+            char t2[700], line[64];
+            snprintf(tmp, sizeof(tmp), "%s/overrun", dir);
+            snprintf(t2, sizeof(t2), "%s.part", tmp); remove(t2);
+            snprintf(t2, sizeof(t2), "%s.parts", tmp); remove(t2);
+            pf = nn_pf_open(tmp, 6, 2, &e);
+            CHECK(pf != 0);
+            CHECK_EQ(nn_pf_write(pf, 2, 3, def, 3), NK_OK);
+            nn_ye_init(&y, to_pf, pf);
+            feed_ye(&y, S("=ybegin part=1 total=2 line=128 size=6 name=overrun\n=ypart begin=1 end=3\n"));
+            n = ye_encode(six, 6, 128, line, 1);
+            feed_ye(&y, line, n);
+            feed_ye(&y, S("=yend size=6 part=1\n"));
+            CHECK_EQ(nn_ye_finish(&y), NN_YE_SIZE);
+            CHECK_EQ(y.got, 0);                   /* nothing written at all */
+            nn_pf_close(pf);
+            snprintf(t2, sizeof(t2), "%s.part", tmp);
+            f = fopen(t2, "rb");
+            CHECK(f != 0);
+            if (f) {
+                char got[8] = { 0 };
+                size_t k = fread(got, 1, sizeof(got), f);
+                fclose(f);
+                CHECK_EQ(k, 6);
+                CHECK(memcmp(got + 3, "DEF", 3) == 0);   /* part 2 untouched */
+            }
+            remove(t2);
+            snprintf(t2, sizeof(t2), "%s.parts", tmp); remove(t2);
+            /* a single-part post longer than its size= is refused the same way */
+            nn_ye_init(&y, to_sink, 0);
+            feed_ye(&y, S("=ybegin line=128 size=3 name=x\n"));
+            n = ye_encode(six, 6, 128, line, 1);
+            feed_ye(&y, line, n);
+            feed_ye(&y, S("=yend size=6\n"));
+            CHECK_EQ(nn_ye_finish(&y), NN_YE_SIZE);
+            CHECK_EQ(y.got, 0);
+        }
+        /* sizes from headers are capped: no terabyte of zeros, no 32-bit
+         * long overflow in fseek on the Amiga */
+        snprintf(tmp, sizeof(tmp), "%s/huge", dir);
+        CHECK(nn_pf_open(tmp, 1000000000000ull, 2, &e) == 0 && e == NK_EARG);
+        CHECK(nn_pf_open(tmp, NN_PF_MAX, 2, &e) == 0 && e == NK_EARG);
+
         /* parts that leave a hole */
         snprintf(tmp, sizeof(tmp), "%s/gappy", dir);
         { char t2[700]; snprintf(t2, sizeof(t2), "%s.part", tmp); remove(t2);
@@ -282,6 +329,16 @@ int main(int argc, char **argv)
         CHECK_EQ(u.got, 46);
         CHECK(memcmp(sink, "The cat sat on the mat, the cat sat on the mat", 46) == 0);
         CHECK_EQ(u.bad_lines, 0);
+        /* names from "begin" and "=ybegin" are never paths either */
+        nn_uu_init(&u, to_sink, 0);
+        nn_uu_line(&u, S("begin 644 DH0:C/Dir"));
+        CHECK(strcmp(u.name, "Dir") == 0);
+        nn_ye_init(&y, to_sink, 0);
+        feed_ye(&y, S("=ybegin line=128 size=1 name=../../S/Startup-Sequence\n"));
+        CHECK(strcmp(y.name, "Startup-Sequence") == 0);
+        nn_ye_init(&y, to_sink, 0);
+        feed_ye(&y, S("=ybegin line=128 size=1 name=..\n"));
+        CHECK(y.name[0] == 0);
     }
     /* base64 */
     {
