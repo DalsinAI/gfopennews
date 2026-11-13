@@ -8,6 +8,9 @@
  *   gfopennews-cli [options] mark GROUP LOW[-HIGH]      (needs --newsrc)
  *   gfopennews-cli [options] nzb FILE.nzb               (queue it and fetch)
  *   gfopennews-cli [options] resume                     (carry on the queue)
+ *   gfopennews-cli par2 verify|repair FILE.par2         (no server needed)
+ * After a queue run with damaged or missing files, the PAR2 index is read,
+ * just enough paused recovery volumes are fetched, and the files repaired.
  * options: --server HOST --port N --user U --pass-env VAR --socks HOST:PORT
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
@@ -25,6 +28,8 @@
 #include "gfopennews/newsrc.h"
 #include "gfopennews/overview.h"
 #include "gfopennews/queue.h"
+#include "gfopennews/par2.h"
+#include <dirent.h>
 
 typedef struct {
     int  code;
@@ -191,6 +196,139 @@ static const char *state_name(int st)
     }
 }
 
+/* Loads FILE.par2 and every FILE.*.par2 beside it. */
+static int par2_load_set(NNPar2 *p, const char *index, char *dir, size_t dirsz)
+{
+    const char *slash = strrchr(index, '/'), *base = slash ? slash + 1 : index;
+    size_t bl = strlen(base);
+    DIR *d;
+    struct dirent *de;
+    int r;
+    memset(p, 0, sizeof(*p));
+    if (slash) {
+        size_t n = (size_t)(slash - index);
+        if (n >= dirsz) return NK_EARG;
+        memcpy(dir, index, n);
+        dir[n] = 0;
+    } else
+        snprintf(dir, dirsz, ".");
+    if ((r = nn_par2_load(p, index)) != NK_OK)
+        return r;
+    if (bl > 5 && !strcmp(base + bl - 5, ".par2"))
+        bl -= 5;
+    if ((d = opendir(dir)) == 0)
+        return NK_OK;
+    while ((de = readdir(d)) != 0) {
+        size_t nl = strlen(de->d_name);
+        char path[1024];
+        if (nl > bl + 6 && !strncmp(de->d_name, base, bl) && de->d_name[bl] == '.' &&
+            !strcmp(de->d_name + nl - 5, ".par2") && strcmp(de->d_name + bl, ".par2")) {
+            snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+            nn_par2_load(p, path);
+        }
+    }
+    closedir(d);
+    return NK_OK;
+}
+
+/* par2 verify|repair FILE.par2: 0 all good (or repaired), 3 damaged, 1 error */
+static int run_par2(const char *what, const char *index)
+{
+    NNPar2 p;
+    char dir[1024];
+    uint32_t bad, i;
+    int r, status = 0;
+    if ((r = par2_load_set(&p, index, dir, sizeof(dir))) != NK_OK) {
+        fprintf(stderr, "cannot read %s: %s\n", index, nk_strerror(r));
+        nn_par2_free(&p);
+        return 1;
+    }
+    bad = nn_par2_verify(&p, dir);
+    for (i = 0; i < p.nfiles; i++)
+        printf("%s\t%s\t%lu/%lu\n", p.files[i].name,
+               !p.files[i].present ? "missing" : p.files[i].damaged ? "damaged" :
+               p.files[i].too_long ? "too long" : "ok",
+               (unsigned long)p.files[i].damaged, (unsigned long)p.files[i].nslices);
+    printf("damaged slices %lu, recovery blocks %lu\n", (unsigned long)bad, (unsigned long)p.nrec);
+    if (!bad && !p.too_long) {
+        nn_par2_free(&p);
+        return 0;
+    }
+    if (strcmp(what, "repair")) {
+        status = 3;
+    } else if (bad > p.nrec) {
+        printf("need %lu more recovery blocks\n", (unsigned long)(bad - p.nrec));
+        status = 3;
+    } else if ((r = nn_par2_repair(&p, dir)) != NK_OK) {
+        fprintf(stderr, "repair failed: %s\n", nk_strerror(r));
+        status = 1;
+    } else {
+        bad = nn_par2_verify(&p, dir);
+        printf("repaired: %s\n", bad || p.too_long ? "no" : "yes");
+        status = bad || p.too_long ? 1 : 0;
+    }
+    nn_par2_free(&p);
+    return status;
+}
+
+/* After a queue run: if files are damaged and the set's PAR2 index is in,
+ * unpause just enough recovery volumes (answers 1: fetch again), or repair
+ * (answers 0 repaired, 3 not). -1: nothing to do. */
+static int queue_par2(NNQueue *q, const char *out_dir, int *asked)
+{
+    NNQFileInfo fi;
+    NNPar2 p;
+    size_t i, nv = 0;
+    const char *index = 0;
+    uint32_t bad, blocks[64], ids[64];
+    uint8_t pick[64];
+    int damaged = 0, r;
+    char dir[1024];
+    for (i = 0; nn_q_info(q, i, &fi); i++) {
+        size_t nl = strlen(fi.name);
+        if (fi.state == NN_QF_BADCRC || fi.state == NN_QF_INCOMPLETE)
+            damaged = 1;
+        if (fi.state == NN_QF_DONE && nl > 5 && !strcmp(fi.name + nl - 5, ".par2") &&
+            !nn_par2_vol_blocks(fi.name) && fi.path)
+            index = fi.path;
+    }
+    if (!damaged || !index)
+        return -1;
+    if (par2_load_set(&p, index, dir, sizeof(dir)) != NK_OK) {
+        nn_par2_free(&p);
+        return -1;
+    }
+    bad = nn_par2_verify(&p, out_dir);
+    printf("par2: %lu damaged slices, %lu recovery blocks in\n", (unsigned long)bad,
+           (unsigned long)p.nrec);
+    if (bad > p.nrec && !*asked) {
+        for (i = 0; nn_q_info(q, i, &fi) && nv < 64; i++)
+            if (fi.state == NN_QF_PAUSED && nn_par2_vol_blocks(fi.name)) {
+                blocks[nv] = nn_par2_vol_blocks(fi.name);
+                ids[nv++] = fi.id;
+            }
+        nn_par2_pick(blocks, nv, bad - p.nrec, pick);
+        for (i = 0; i < nv; i++)
+            if (pick[i]) {
+                nn_q_pause(q, ids[i], 0);
+                printf("par2: fetching %lu more blocks\n", (unsigned long)blocks[i]);
+            }
+        *asked = 1;
+        nn_par2_free(&p);
+        return 1;
+    }
+    if (bad > p.nrec) {
+        printf("par2: need %lu more recovery blocks\n", (unsigned long)(bad - p.nrec));
+        nn_par2_free(&p);
+        return 3;
+    }
+    r = nn_par2_repair(&p, out_dir);
+    bad = r == NK_OK ? nn_par2_verify(&p, out_dir) : 1;
+    printf("par2: repaired %s\n", bad ? "no" : "yes");
+    nn_par2_free(&p);
+    return bad ? 3 : 0;
+}
+
 /* nzb FILE | resume: fetch over `conns` connections per server */
 static int run_queue(NNClient *first, int argc, char **argv, const char *server2,
                      const char *socks, const char *user, const char *passenv,
@@ -198,7 +336,7 @@ static int run_queue(NNClient *first, int argc, char **argv, const char *server2
 {
     NNQueue *q;
     NNClient *cl[16];
-    int ncl = 0, nservers = server2 ? 2 : 1, e, k, status = 0;
+    int ncl = 0, nservers = server2 ? 2 : 1, e, k, status = 0, par2, asked = 0;
     size_t i;
     NNQFileInfo fi;
     uint32_t tick = 0;
@@ -237,6 +375,7 @@ static int run_queue(NNClient *first, int argc, char **argv, const char *server2
     }
     if (limit >= 0)
         nn_q_limit(q, limit);
+again:
     while (nn_q_step(q)) {
         struct pollfd p[16];
         for (k = 0; k < ncl; k++) {
@@ -254,12 +393,17 @@ static int run_queue(NNClient *first, int argc, char **argv, const char *server2
                 cl[k--] = cl[--ncl];
             }
     }
+    par2 = ncl && limit < 0 ? queue_par2(q, out_dir, &asked) : -1;
+    if (par2 == 1)
+        goto again;
     for (i = 0; nn_q_info(q, i, &fi); i++) {
         printf("%s\t%s\t%lu/%lu\t%s\n", fi.name, state_name(fi.state), (unsigned long)fi.done,
                (unsigned long)fi.nsegs, fi.path ? fi.path : "-");
         if (fi.state == NN_QF_BADCRC || fi.state == NN_QF_INCOMPLETE)
             status = 3;
     }
+    if (par2 >= 0)
+        status = par2;
     nn_q_compact(q);
     nn_q_close(q);
     for (k = 0; k < ncl; k++)
@@ -273,7 +417,8 @@ static void usage(void)
           "       [--socks H:P] [--newsrc FILE] [--cache DIR]\n"
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
           "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
-          "       | nzb FILE.nzb | resume\n",
+          "       | nzb FILE.nzb | resume\n"
+          "       gfopennews-cli par2 verify|repair FILE.par2\n",
           stderr);
 }
 
@@ -311,6 +456,14 @@ int main(int argc, char **argv)
     if (newsrc && nn_rc_load(&rc, newsrc) != NK_OK) {
         fprintf(stderr, "cannot read %s\n", newsrc);
         return 1;
+    }
+    if (!strcmp(argv[i], "par2")) {
+        nn_rc_free(&rc);
+        if (i + 2 >= argc || (strcmp(argv[i + 1], "verify") && strcmp(argv[i + 1], "repair"))) {
+            usage();
+            return 2;
+        }
+        return run_par2(argv[i + 1], argv[i + 2]);
     }
     /* "mark" needs no server */
     if (!strcmp(argv[i], "mark")) {
