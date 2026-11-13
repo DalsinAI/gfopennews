@@ -26,7 +26,7 @@
 static const char VERSTAG[] = "$VER: GFOpenNews 0.1 (13.11.2026)";
 
 struct Library *SocketBase;
-struct Library *GFOpenTLSBase;
+struct Library *OpenTLSBase;
 #ifdef HAVE_GFOPENKEYS
 struct Library *GFOpenKeysBase;
 #endif
@@ -46,7 +46,7 @@ int nn_plat_init(const NNPlatOpts *o)
     if (o->tls) {
         struct OTContextConfig cc;
         LONG err = 0;
-        if (!(GFOpenTLSBase = OpenLibrary((CONST_STRPTR)OPENTLSLIB_NAME, OPENTLSLIB_VERSION))) {
+        if (!(OpenTLSBase = OpenLibrary((CONST_STRPTR)OPENTLSLIB_NAME, OPENTLSLIB_VERSION))) {
             fprintf(stderr, "--tls needs %s\n", OPENTLSLIB_NAME);
             nn_plat_exit();
             return 0;
@@ -73,8 +73,8 @@ void nn_plat_exit(void)
     if (GFOpenKeysBase) CloseLibrary(GFOpenKeysBase);
     GFOpenKeysBase = 0;
 #endif
-    if (GFOpenTLSBase) CloseLibrary(GFOpenTLSBase);
-    GFOpenTLSBase = 0;
+    if (OpenTLSBase) CloseLibrary(OpenTLSBase);
+    OpenTLSBase = 0;
     if (SocketBase) CloseLibrary(SocketBase);
     SocketBase = 0;
 }
@@ -145,7 +145,7 @@ int nn_plat_connect(const NNPlatOpts *o, const char *host, int port, NKTransport
         return NK_OK;
     }
     fd = tcp.fd(tcp.ctx);
-    if ((r = nk_amiga_tls(GFOpenTLSBase, ctx, host, o->insecure ? OTV_NONE : OTV_FULL,
+    if ((r = nk_amiga_tls(OpenTLSBase, ctx, host, o->insecure ? OTV_NONE : OTV_FULL,
                           0, &tcp, t)) != NK_OK) {
         fprintf(stderr, "TLS: %s\n", nk_strerror(r));
         nk_transport_close(&tcp);
