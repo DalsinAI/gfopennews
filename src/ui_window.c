@@ -146,15 +146,23 @@ static long row_of(const NNWin *w, uint32_t number)
     return -1;
 }
 
+/* olui keeps a list's selection by row, so after the rows change it is set
+ * again from what the rows hold: only row (-1: none) stays selected. */
+static void select_only(NNWin *w, olui_el *list, long row)
+{
+    int i;
+    for (i = 0; i < olui_vlist_rows(list); i++)
+        if (i != row && olui_vlist_selected(list, i)) olui_vlist_select(w->ui, list, i, 0);
+    if (row >= 0) {
+        olui_vlist_select(w->ui, list, (int)row, 1);
+        olui_vlist_set_current(w->ui, list, (int)row);
+    }
+}
+
 static void show_threads(NNWin *w)
 {
-    long r;
     olui_vlist_set(w->ui, w->threads, w->t ? (int)nn_ut_rows(w->t) : 0, thread_cell, w);
-    r = row_of(w, w->number);
-    if (r >= 0) {
-        olui_vlist_select(w->ui, w->threads, (int)r, 1);
-        olui_vlist_set_current(w->ui, w->threads, (int)r);
-    }
+    select_only(w, w->threads, row_of(w, w->number));
 }
 
 static void show_groups(NNWin *w)
@@ -162,10 +170,7 @@ static void show_groups(NNWin *w)
     long r;
     olui_vlist_set(w->ui, w->groups, w->g ? (int)nn_ug_rows(w->g) : 0, group_cell, w);
     r = w->g && w->group[0] ? nn_ug_find(w->g, w->group) : -1;
-    if (r >= 0) {
-        olui_vlist_select(w->ui, w->groups, (int)r, 1);
-        olui_vlist_set_current(w->ui, w->groups, (int)r);
-    }
+    select_only(w, w->groups, r);
 }
 
 void nn_win_groups(NNWin *w, NNUiGroups *g) { w->g = g; show_groups(w); }
@@ -183,9 +188,12 @@ void nn_win_article(NNWin *w, const char *text)
 
 int nn_win_queue(NNWin *w, const NNUiQFile *files, size_t n)
 {
-    size_t i, bytes = 0;
+    size_t i, k, bytes = 0;
     NNUiQFile *q;
     char *names, *p;
+    uint32_t *chosen, cur = 0;
+    size_t nchosen = 0;
+    int curat = olui_vlist_current(w->queue);
     for (i = 0; i < n; i++) bytes += strlen(files[i].name ? files[i].name : "") + 1;
     q = malloc((n ? n : 1) * sizeof(*q));
     names = malloc(bytes ? bytes : 1);
@@ -197,9 +205,22 @@ int nn_win_queue(NNWin *w, const NNUiQFile *files, size_t n)
         q[i].name = p;
         p += k;
     }
+    /* the files chosen, by id: the rows may hold other files now */
+    chosen = malloc((w->nq ? w->nq : 1) * sizeof(*chosen));
+    if (!chosen) { free(q); free(names); return 0; }
+    for (i = 0; i < w->nq; i++)
+        if (olui_vlist_selected(w->queue, (int)i)) chosen[nchosen++] = w->q[i].id;
+    if (curat >= 0 && (size_t)curat < w->nq) cur = w->q[curat].id;
     free(w->q); free(w->qnames);
     w->q = q; w->qnames = names; w->nq = n;
     olui_vlist_set(w->ui, w->queue, (int)n, queue_cell, w);
+    for (i = 0; i < n; i++) {
+        int sel = 0;
+        for (k = 0; k < nchosen; k++) if (q[i].id == chosen[k]) sel = 1;
+        if (sel != olui_vlist_selected(w->queue, (int)i)) olui_vlist_select(w->ui, w->queue, (int)i, sel);
+        if (cur && q[i].id == cur) olui_vlist_set_current(w->ui, w->queue, (int)i);
+    }
+    free(chosen);
     return 1;
 }
 
@@ -294,13 +315,7 @@ static void next_unread(NNWin *w)
     row = nn_ut_next_unread(w->t, row_of(w, w->number));
     if (row < 0) { nn_win_status(w, "No more unread articles here."); return; }
     olui_vlist_set(w->ui, w->threads, (int)nn_ut_rows(w->t), thread_cell, w);
-    {
-        int i;
-        for (i = 0; i < olui_vlist_rows(w->threads); i++)
-            if (olui_vlist_selected(w->threads, i)) olui_vlist_select(w->ui, w->threads, i, 0);
-    }
-    olui_vlist_select(w->ui, w->threads, (int)row, 1);
-    olui_vlist_set_current(w->ui, w->threads, (int)row);
+    select_only(w, w->threads, row);
     choose_article(w, row);
 }
 
@@ -334,7 +349,7 @@ static void on_event(olui *ui, const olui_event *ev, void *userdata)
         const NNUiRow *r = w->t ? nn_ut_row(w->t, (size_t)ev->index) : NULL;
         if (r && r->children) {
             nn_ut_open(w->t, (size_t)ev->index, !r->open);
-            olui_vlist_set(w->ui, w->threads, (int)nn_ut_rows(w->t), thread_cell, w);
+            show_threads(w);           /* the chosen article stays chosen where it moved to */
             olui_vlist_set_current(w->ui, w->threads, ev->index);
         }
     } else if (ev->type == OLUI_CLICK) {

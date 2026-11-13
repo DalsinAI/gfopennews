@@ -238,6 +238,23 @@ int main(void)
     click(ui, "next");
     CHECK_EQ(seen.article, 13);
     CHECK(!strcmp(olui_get_text(olui_find(ui, "status")), "No more unread articles here."));
+    /* folding a thread above the chosen article keeps it chosen where it moved */
+    click_row(ui, "threads", 0, OLUI_MOUSE_DOUBLE);
+    CHECK_EQ(olui_vlist_rows(olui_find(ui, "threads")), 3);
+    CHECK_EQ(nn_win_article_number(win), 13);
+    CHECK(olui_vlist_selected(olui_find(ui, "threads"), 2));
+    CHECK(!olui_vlist_selected(olui_find(ui, "threads"), 0) && !olui_vlist_selected(olui_find(ui, "threads"), 1));
+    click_row(ui, "threads", 0, OLUI_MOUSE_DOUBLE);
+    CHECK_EQ(olui_vlist_rows(olui_find(ui, "threads")), 4);
+    CHECK(olui_vlist_selected(olui_find(ui, "threads"), 3));
+    CHECK(!olui_vlist_selected(olui_find(ui, "threads"), 2) && !olui_vlist_selected(olui_find(ui, "threads"), 0));
+    /* a refresh that moves rows leaves one row highlighted */
+    nn_win_refresh(win);
+    {
+        int i, n = 0;
+        for (i = 0; i < 4; i++) n += olui_vlist_selected(olui_find(ui, "threads"), i);
+        CHECK_EQ(n, 1);
+    }
 
     /* a follow-up: the Post tab, subject, references and the text quoted, signature left out */
     click(ui, "followup");
@@ -293,6 +310,21 @@ int main(void)
     CHECK(seen.resumes == 1 && seen.qid == 8);
     click(ui, "qremove");
     CHECK(seen.removes == 1 && seen.qid == 8);
+    /* the queue shown again keeps the chosen file by id, not by row */
+    q[0].id = 8; q[0].name = "debian.par2";
+    q[1].id = 7; q[1].name = "debian.iso";
+    CHECK(nn_win_queue(win, q, 2));
+    CHECK(olui_vlist_selected(olui_find(ui, "queue"), 0) && !olui_vlist_selected(olui_find(ui, "queue"), 1));
+    CHECK_EQ(olui_vlist_current(olui_find(ui, "queue")), 0);
+    click(ui, "qremove");
+    CHECK(seen.removes == 2 && seen.qid == 8);
+    /* and when it went, nothing is chosen: Remove does nothing (Legion's case: 7 and 9 left) */
+    q[0].id = 7; q[0].name = "debian.iso";
+    q[1].id = 9; q[1].name = "ubuntu.iso";
+    CHECK(nn_win_queue(win, q, 2));
+    CHECK(!olui_vlist_selected(olui_find(ui, "queue"), 0) && !olui_vlist_selected(olui_find(ui, "queue"), 1));
+    click(ui, "qremove");
+    CHECK(seen.removes == 2 && seen.qid == 8);
     CHECK(olui_box(ui, olui_find(ui, "queue"), &r) && r.h > 300);
 
     nn_win_free(win);
