@@ -11,7 +11,8 @@ endif()
 set(NETKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopennetkit" CACHE PATH "gfopennetkit checkout")
 add_subdirectory(${NETKIT_DIR} netkit)
 
-add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c)
+add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c
+  src/decode.c src/partfile.c)
 target_include_directories(gfopennews_core PUBLIC include)
 target_link_libraries(gfopennews_core PUBLIC gfopennetkit)
 
@@ -20,7 +21,7 @@ target_link_libraries(gfopennews-cli gfopennews_core)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
-foreach(t nntp newsrc overview)
+foreach(t nntp newsrc overview binaries)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} gfopennews_core)
   target_include_directories(test_${t} PRIVATE ${NETKIT_DIR}/tests)
@@ -28,6 +29,7 @@ endforeach()
 add_test(NAME nntp COMMAND test_nntp)
 add_test(NAME newsrc COMMAND test_newsrc ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME overview COMMAND test_overview ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME binaries COMMAND test_binaries ${CMAKE_CURRENT_BINARY_DIR})
 if(Python3_FOUND)
   add_test(NAME cli_fake_server
     COMMAND ${Python3_EXECUTABLE} ${NETKIT_DIR}/tests/fakes/fakeserv.py --run nntp,socks5 --
