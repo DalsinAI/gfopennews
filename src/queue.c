@@ -48,8 +48,20 @@ typedef struct Job {
     NNClient *c;
     int      server;
     NNYenc   y;
-    int      write_err;
+    int      write_err;     /* the disk failed */
+    int      bad;           /* the article's data doesn't hang together */
+    uint8_t *buf;           /* the decoded segment, written once it checks */
+    size_t   blen, bcap;
+    uint64_t boff;
 } Job;
+
+#define JOB_MAXBUF (16u << 20)   /* bytes in one segment we hold */
+
+static void job_free(Job *jb)
+{
+    free(jb->buf);
+    free(jb);
+}
 
 struct NNQueue {
     char      *dir, *out;
@@ -494,20 +506,42 @@ static int job_write(void *u, uint64_t off, const uint8_t *d, size_t n)
     NNQueue *q = jb->q;
     QFile *f = find(q, jb->fid);
     if (!f) return -1;
+    if (f->size && f->size != jb->y.size) {
+        jb->bad = 1;               /* another file's size: a wrong article */
+        return -1;
+    }
     if (!f->pf) {
         if (!f->size) {
             f->size = jb->y.size;
             rec(q, "Z %lu %llu", (unsigned long)f->id, (unsigned long long)f->size);
         }
-        if (f->size != jb->y.size || open_pf(q, f) != NK_OK) {
+        if (open_pf(q, f) != NK_OK) {
             jb->write_err = 1;
             return -1;
         }
     }
-    if (nn_pf_put(f->pf, off, d, n) != NK_OK) {
-        jb->write_err = 1;
+    /* held in memory until the article ends and its CRC checks: a bad
+     * article never touches the part file */
+    if (!jb->blen)
+        jb->boff = off;
+    if (off != jb->boff + jb->blen || n > JOB_MAXBUF - jb->blen) {
+        jb->bad = 1;
         return -1;
     }
+    if (jb->blen + n > jb->bcap) {
+        size_t c = jb->bcap ? jb->bcap : 65536;
+        uint8_t *b;
+        while (c < jb->blen + n) c *= 2;
+        if (c > JOB_MAXBUF) c = JOB_MAXBUF;
+        if (!(b = (uint8_t *)realloc(jb->buf, c))) {
+            jb->write_err = 1;
+            return -1;
+        }
+        jb->buf = b;
+        jb->bcap = c;
+    }
+    memcpy(jb->buf + jb->blen, d, n);
+    jb->blen += n;
     return 0;
 }
 
@@ -543,7 +577,7 @@ static void job_done(void *u, int code, const char *text, size_t tl, int err)
     NNQueue *q = jb->q;
     QFile *f = find(q, jb->fid);
     QSeg *s = f ? &f->segs[jb->si] : 0;
-    int ys;
+    int ys, good;
     (void)text; (void)tl;
     {
         int i;
@@ -552,12 +586,21 @@ static void job_done(void *u, int code, const char *text, size_t tl, int err)
                 q->conns[i].inflight--;
     }
     if (!f) {
-        free(jb);
+        job_free(jb);
         return;
     }
     f->inflight--;
     ys = nn_ye_finish(&jb->y);
-    if (code == 222 && err == NK_OK && ys == NN_YE_OK && jb->y.got && !jb->write_err &&
+    good = code == 222 && err == NK_OK && ys == NN_YE_OK && jb->y.got && !jb->write_err &&
+           !jb->bad && f->pf && jb->boff == jb->y.begin - 1 && jb->blen == jb->y.got;
+    if (good) {
+        int pr = nn_pf_put(f->pf, jb->boff, jb->buf, jb->blen);
+        if (pr == NK_EARG)
+            good = 0;              /* over a part held: a wrong article */
+        else if (pr != NK_OK)
+            jb->write_err = 1;
+    }
+    if (good && !jb->write_err &&
         nn_pf_commit(f->pf, jb->si + 1, jb->y.begin - 1, jb->y.got, jb->y.crc) == NK_OK) {
         if ((jb->y.have & NN_YE_HAVE_CRC) &&
             (!(jb->y.have & NN_YE_HAVE_PART) || !(jb->y.have & NN_YE_HAVE_PCRC) ||
@@ -585,7 +628,7 @@ static void job_done(void *u, int code, const char *text, size_t tl, int err)
             s->state = S_TODO;
     }
     finish_file(q, f);
-    free(jb);
+    job_free(jb);
 }
 
 /* the next segment connection `cn` may fetch, or 0 */
@@ -633,7 +676,7 @@ int nn_q_step(NNQueue *q)
             nn_ye_init(&jb->y, job_write, jb);
             snprintf(line, sizeof(line), "BODY <%s>", f->segs[si].msgid);
             if (nn_cmd(cn->c, line, NN_MULTI, job_line, jb, job_done, jb) != NK_OK) {
-                free(jb);
+                job_free(jb);
                 break;
             }
             f->segs[si].state = S_FLIGHT;
