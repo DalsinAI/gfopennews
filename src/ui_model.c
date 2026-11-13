@@ -496,6 +496,7 @@ int nn_ut_build(NNUiThreads *t, int fold)
         c->row.children = kids_of(t, (long)i);
         c->row.open = c->row.children ? !fold : 1;
         c->row.msgid = c->msgid;
+        c->row.references = c->has ? c->refs : "";
         if (c->has) {
             c->row.subject = c->subject; c->row.from = c->from; c->row.date = c->date;
         } else {                       /* a missing article: its first answer's subject */

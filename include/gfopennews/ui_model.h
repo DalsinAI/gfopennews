@@ -57,6 +57,7 @@ typedef struct NNUiRow {
     uint32_t    number;       /* article number; 0: a missing article that holds a thread together */
     int         depth;        /* 0 for a thread's first article */
     const char *subject, *from, *date, *msgid;
+    const char *references;   /* as the header gave them ("" for a missing article) */
     uint32_t    bytes, lines;
     int         children;     /* how many articles answer this one directly */
     int         open;         /* its answers shown (a row without answers is open) */
