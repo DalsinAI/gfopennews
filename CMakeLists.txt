@@ -12,16 +12,32 @@ set(NETKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopennetkit" CACHE PATH "gfopenn
 add_subdirectory(${NETKIT_DIR} netkit)
 
 add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c
-  src/decode.c src/partfile.c src/nzb.c src/queue.c)
+  src/decode.c src/partfile.c src/nzb.c src/queue.c src/ui_model.c)
 target_include_directories(gfopennews_core PUBLIC include)
 target_link_libraries(gfopennews_core PUBLIC gfopennetkit)
+
+# The reader window needs GFOpenLayout's UI (olui) built for the host: its
+# sources from a gfopenlayout checkout (default: next to this one).
+set(GFOPENLAYOUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopenlayout" CACHE PATH "gfopenlayout checkout")
+if(EXISTS ${GFOPENLAYOUT_DIR}/include/gfopenlayout_ui.h)
+  set(OL ${GFOPENLAYOUT_DIR})
+  add_library(olui_host STATIC
+    ${OL}/src/openlayout.c ${OL}/src/gfcss_parse.c ${OL}/src/gfcss_values.c ${OL}/src/gfcss_select.c
+    ${OL}/src/openlayout_css.c ${OL}/ui/olui.c ${OL}/ui/olui_css.c ${OL}/ui/olui_markup.c ${OL}/ui/olui_theme_none.c)
+  target_include_directories(olui_host PUBLIC ${OL}/include PRIVATE ${OL}/ui ${OL}/src)
+  add_library(gfopennews_ui STATIC src/ui_window.c)
+  target_link_libraries(gfopennews_ui PUBLIC gfopennews_core olui_host)
+  set(HAVE_OLUI 1)
+else()
+  message(STATUS "gfopenlayout not found at ${GFOPENLAYOUT_DIR}: the reader window and its test are left out")
+endif()
 
 add_executable(gfopennews-cli src/cli.c)
 target_link_libraries(gfopennews-cli gfopennews_core)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
-foreach(t nntp newsrc overview binaries nzb queue_journal)
+foreach(t nntp newsrc overview binaries nzb queue_journal ui_model)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} gfopennews_core)
   target_include_directories(test_${t} PRIVATE ${NETKIT_DIR}/tests)
@@ -33,6 +49,13 @@ add_test(NAME binaries COMMAND test_binaries ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME nzb COMMAND test_nzb)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/qj)
 add_test(NAME queue_journal COMMAND test_queue_journal ${CMAKE_CURRENT_BINARY_DIR}/qj)
+add_test(NAME ui_model COMMAND test_ui_model)
+if(HAVE_OLUI)
+  add_executable(test_ui_window tests/test_ui_window.c)
+  target_link_libraries(test_ui_window gfopennews_ui)
+  target_include_directories(test_ui_window PRIVATE ${NETKIT_DIR}/tests)
+  add_test(NAME ui_window COMMAND test_ui_window)
+endif()
 if(Python3_FOUND)
   add_test(NAME cli_fake_server
     COMMAND ${Python3_EXECUTABLE} ${NETKIT_DIR}/tests/fakes/fakeserv.py --run nntp,socks5 --
