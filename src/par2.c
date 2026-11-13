@@ -251,7 +251,8 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
         if (bl < 4 || (p->have_main && bl - 4 != p->slice)) return 0;
         e = le32(body);
         for (i = 0; i < p->nrec; i++)
-            if (p->rec[i].exponent == e) return 0;      /* have it */
+            if (p->rec[i].exponent == e && !memcmp(p->rec[i].set_id, pk + 32, 16))
+                return 0;                               /* have it */
         nr = (NNPar2Rec *)realloc(p->rec, (p->nrec + 1) * sizeof(NNPar2Rec));
         if (!nr) return NK_ENOMEM;
         p->rec = nr;

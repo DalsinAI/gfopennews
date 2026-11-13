@@ -290,14 +290,13 @@ int main(int argc, char **argv)
         memset(b, 0, sizeof(b));
         put32(b, 1);
         n = packet(buf, set, T_RECV, b, 4 + 4);
-        put32(b, 2);
-        n += packet(buf + n, other, T_RECV, b, 4 + 8);
+        put32(b, 4);
+        n += packet(buf + n, other, T_RECV, b, 4 + 8);  /* takes exponent 4 first */
+        n += packet(buf + n, set, T_RECV, b, 4 + 8);    /* ours, the right size: kept */
         n += mk_main(buf + n, set, 8, ids, 1);
         n += mk_desc(buf + n, set, ids[0], 8, "r.bin");
         put32(b, 3);
         n += packet(buf + n, set, T_RECV, b, 4 + 4);
-        put32(b, 4);
-        n += packet(buf + n, set, T_RECV, b, 4 + 8);   /* the right size: kept */
         CHECK(write_file(path, buf, n));
         memset(&p, 0, sizeof(p));
         CHECK_EQ(nn_par2_load(&p, path), NK_OK);
