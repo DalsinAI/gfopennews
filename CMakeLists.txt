@@ -12,7 +12,7 @@ set(NETKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopennetkit" CACHE PATH "gfopenn
 add_subdirectory(${NETKIT_DIR} netkit)
 
 add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c
-  src/decode.c src/partfile.c src/nzb.c src/queue.c src/ui_model.c)
+  src/decode.c src/partfile.c src/nzb.c src/queue.c src/md5.c src/par2.c src/ui_model.c)
 target_include_directories(gfopennews_core PUBLIC include)
 target_link_libraries(gfopennews_core PUBLIC gfopennetkit)
 
@@ -37,7 +37,7 @@ target_link_libraries(gfopennews-cli gfopennews_core)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
-foreach(t nntp newsrc overview binaries nzb queue_journal ui_model)
+foreach(t nntp newsrc overview binaries nzb queue_journal par2 ui_model)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} gfopennews_core)
   target_include_directories(test_${t} PRIVATE ${NETKIT_DIR}/tests)
@@ -49,6 +49,7 @@ add_test(NAME binaries COMMAND test_binaries ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME nzb COMMAND test_nzb)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/qj)
 add_test(NAME queue_journal COMMAND test_queue_journal ${CMAKE_CURRENT_BINARY_DIR}/qj)
+add_test(NAME par2 COMMAND test_par2 ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME ui_model COMMAND test_ui_model)
 if(HAVE_OLUI)
   add_executable(test_ui_window tests/test_ui_window.c)
@@ -67,4 +68,13 @@ if(Python3_FOUND)
             $<TARGET_FILE:gfopennews-cli> ${CMAKE_CURRENT_BINARY_DIR})
   set_tests_properties(queue_fake_servers PROPERTIES ENVIRONMENT
     "NK_NNTP_SPOOL=${CMAKE_CURRENT_BINARY_DIR}/spool1;NK_NNTP2_SPOOL=${CMAKE_CURRENT_BINARY_DIR}/spool2")
+  add_test(NAME par2_cli
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_par2.py
+            $<TARGET_FILE:gfopennews-cli> ${CMAKE_CURRENT_BINARY_DIR})
+  add_test(NAME par2_queue
+    COMMAND ${Python3_EXECUTABLE} ${NETKIT_DIR}/tests/fakes/fakeserv.py --run nntp --
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_par2_queue.py
+            $<TARGET_FILE:gfopennews-cli> ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(par2_queue PROPERTIES ENVIRONMENT
+    "NK_NNTP_SPOOL=${CMAKE_CURRENT_BINARY_DIR}/spool-par2")
 endif()
