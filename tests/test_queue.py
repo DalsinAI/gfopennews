@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 
-from newsfixture import nzb_file, post, rnd
+from newsfixture import nzb_file, post, rnd, yenc
 
 cli, work = sys.argv[1], sys.argv[2]
 spool1 = os.environ["NK_NNTP_SPOOL"]
@@ -40,6 +40,15 @@ d = rnd(4000, 4)
 segs_d = [(n, by, mid) for n, (_, by, mid) in zip((1, 2, 7), post("gap.bin", d, 3, lambda p: [spool1], "d"))]
 
 
+# a hostile article for part 2 on server 1 claims part 1's range (with a
+# wrong pcrc32); server 2 has the right one. Part 1 must stay intact.
+e = rnd(6000, 5)
+segs_e = post("overlap.bin", e, 2, lambda p: [spool1] if p == 1 else [spool2], "e")
+bad = (b"=ybegin part=2 total=2 line=128 size=%d name=overlap.bin\n=ypart begin=1 end=3000\n" % len(e) +
+       yenc(b"X" * 3000) + b"=yend size=3000 part=2 pcrc32=00000000\n")
+with open(os.path.join(spool1, segs_e[1][2] + ".art"), "wb") as f:
+    f.write(bad)
+
 nzb = os.path.join(work, "test.nzb")
 with open(nzb, "w") as f:
     f.write('<?xml version="1.0"?><nzb>' +
@@ -47,13 +56,14 @@ with open(nzb, "w") as f:
             nzb_file("&quot;small.txt&quot; yEnc (1/1)", segs_b) +
             nzb_file("&quot;broken.bin&quot; yEnc (1/2)", segs_c) +
             # a raw '>' inside the quoted subject (legal XML) must not end the tag
-            nzb_file("2 > 1 &quot;gap.bin&quot; yEnc (1/3)", segs_d) + "</nzb>")
+            nzb_file("2 > 1 &quot;gap.bin&quot; yEnc (1/3)", segs_d) +
+            nzb_file("&quot;overlap.bin&quot; yEnc (1/2)", segs_e) + "</nzb>")
 
 env = dict(os.environ, NEWS_PW="s3cret")
 base = [cli, "--server", "127.0.0.1", "--port", p1, "--server2", "127.0.0.1:" + p2,
         "--user", "dale", "--pass-env", "NEWS_PW", "--out", out, "--conns", "2"]
 r = subprocess.run(base + ["--limit", "3", "nzb", nzb], capture_output=True, text=True, env=env, timeout=60)
-check("added 4 files" in r.stdout, "added: %r %r" % (r.stdout, r.stderr))
+check("added 5 files" in r.stdout, "added: %r %r" % (r.stdout, r.stderr))
 check(not os.path.exists(os.path.join(out, "amiga demo.lha")), "not finished after 3 segments")
 check(os.path.exists(os.path.join(out, "queue.db")), "queue journal written")
 r = subprocess.run(base + ["resume"], capture_output=True, text=True, env=env, timeout=60)
@@ -69,6 +79,9 @@ with open(os.path.join(out, "small.txt"), "rb") as f:
     check(f.read() == b, "small bytes")
 with open(os.path.join(out, "gap.bin"), "rb") as f:
     check(f.read() == d, "gap bytes")
+check(lines.get("overlap.bin", [None, None])[1] == "done", "overlap done: %r" % r.stdout)
+with open(os.path.join(out, "overlap.bin"), "rb") as f:
+    check(f.read() == e, "overlap bytes: part 1 not overwritten")
 check(os.path.exists(os.path.join(out, "broken.bin.part")), "broken keeps its .part for repair")
 check(not os.path.exists(os.path.join(out, "amiga demo.lha.parts")), "state removed when done")
 # a third run has nothing left to fetch and says the same
