@@ -94,19 +94,42 @@ static int id_cmp(const void *a, const void *b)
     return memcmp(((const NNPar2File *)a)->id, ((const NNPar2File *)b)->id, 16);
 }
 
+/* slice numbers for every file; a set over NN_PAR2_MAXSLICES is refused
+ * (so nslices, first and the totals never wrap, even on 32 bits) */
 static void layout(NNPar2 *p)
 {
-    uint32_t i, at = 0;
+    uint32_t i;
+    uint64_t at = 0;
     if (!p->slice) return;
     for (i = 0; i < p->nfiles; i++) {
         NNPar2File *f = &p->files[i];
         if (f->length || f->name[0]) {
-            f->nslices = (uint32_t)((f->length + p->slice - 1) / p->slice);
+            uint64_t n = f->length / p->slice + (f->length % p->slice != 0);
+            if (n > NN_PAR2_MAXSLICES) {
+                p->too_big = 1;
+                n = 0;
+            }
+            f->nslices = (uint32_t)n;
         }
-        f->first = at;
+        f->first = (uint32_t)at;
         at += f->nslices;
+        if (at > NN_PAR2_MAXSLICES) {
+            p->too_big = 1;
+            at = NN_PAR2_MAXSLICES;
+        }
     }
-    p->total_slices = at;
+    p->total_slices = (uint32_t)at;
+}
+
+static void free_file_data(NNPar2File *f)
+{
+    free(f->slice_md5);
+    free(f->slice_crc);
+    free(f->bad);
+    f->slice_md5 = 0;
+    f->slice_crc = 0;
+    f->bad = 0;
+    f->nifsc = 0;
 }
 
 static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, uint64_t len)
@@ -121,30 +144,69 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
         uint32_t n, i;
         if (p->have_main || bl < 12) return 0;
         n = le32(body + 8);
-        if (12 + (uint64_t)n * 16 > bl || n > 100000) return 0;
-        memcpy(p->set_id, pk + 32, 16);
-        p->slice = le64(body);
-        if (!p->slice || p->slice % 4) return 0;
+        if (12 + (uint64_t)n * 16 > bl || n > NN_PAR2_MAXSLICES) return 0;
+        if (!le64(body) || le64(body) % 4 || le64(body) > NN_PAR2_MAXSLICE) return 0;
         /* files described before the main packet keep their details */
         {
             NNPar2File *nf = (NNPar2File *)calloc(n ? n : 1, sizeof(NNPar2File));
             if (!nf) return NK_ENOMEM;
-            for (i = 0; i < n; i++) {
-                NNPar2File *old = file_by_id(p, body + 12 + i * 16);
-                if (old) nf[i] = *old;
+            for (i = 0; i < n; i++)
                 memcpy(nf[i].id, body + 12 + i * 16, 16);
+            qsort(nf, n, sizeof(NNPar2File), id_cmp);
+            for (i = 1; i < n; i++)
+                if (!memcmp(nf[i - 1].id, nf[i].id, 16)) {
+                    free(nf);      /* the same file twice: a broken packet */
+                    return 0;
+                }
+            for (i = 0; i < n; i++) {
+                NNPar2File *old = file_by_id(p, nf[i].id);
+                if (old) {
+                    nf[i] = *old;
+                    memset(old->id, 0, 16);     /* moved: not freed below */
+                    old->slice_md5 = 0;
+                    old->slice_crc = 0;
+                    old->bad = 0;
+                }
             }
+            for (i = 0; i < p->nfiles; i++)
+                free_file_data(&p->files[i]);   /* kept but not in the set */
             free(p->files);
             p->files = nf;
             p->nfiles = n;
         }
-        qsort(p->files, p->nfiles, sizeof(NNPar2File), id_cmp);
+        memcpy(p->set_id, pk + 32, 16);
+        p->slice = le64(body);
         p->have_main = 1;
+        /* recovery packets kept before this: only this set's, whole slices */
+        {
+            uint32_t k = 0;
+            for (i = 0; i < p->nrec; i++) {
+                if (!memcmp(p->rec[i].set_id, p->set_id, 16) && p->rec[i].len == p->slice)
+                    p->rec[k++] = p->rec[i];
+                else
+                    free(p->rec[i].path);
+            }
+            p->nrec = k;
+        }
         layout(p);
     } else if (!memcmp(pk + 48, T_DESC, 16)) {
         NNPar2File *f;
         size_t nl;
+        char name[256];
         if (bl < 56) return 0;
+        nl = (size_t)(bl - 56);
+        if (nl >= sizeof(name)) nl = sizeof(name) - 1;
+        memcpy(name, body + 56, nl);
+        name[nl] = 0;
+        /* never a path: keep the last part */
+        {
+            char *c = strrchr(name, '/'), *b = strrchr(name, '\\'), *k = strrchr(name, ':');
+            if (b > c) c = b;
+            if (k > c) c = k;
+            if (c) memmove(name, c + 1, strlen(c + 1) + 1);
+        }
+        if (!name[0] || !strcmp(name, ".") || !strcmp(name, ".."))
+            return 0;
         f = file_by_id(p, body);
         if (!f) {
             if (p->have_main) return 0;      /* not in the recovery set */
@@ -161,23 +223,15 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
         memcpy(f->md5, body + 16, 16);
         memcpy(f->md5_16k, body + 32, 16);
         f->length = le64(body + 48);
-        nl = (size_t)(bl - 56);
-        if (nl >= sizeof(f->name)) nl = sizeof(f->name) - 1;
-        memcpy(f->name, body + 56, nl);
-        f->name[nl] = 0;
-        /* never a path: keep the last part */
-        {
-            char *c = strrchr(f->name, '/'), *b = strrchr(f->name, '\\'), *k = strrchr(f->name, ':');
-            if (b > c) c = b;
-            if (k > c) c = k;
-            if (c) memmove(f->name, c + 1, strlen(c + 1) + 1);
-        }
+        memcpy(f->name, name, sizeof(f->name));
         if (p->have_main) layout(p);
     } else if (!memcmp(pk + 48, T_IFSC, 16)) {
         NNPar2File *f = bl >= 16 ? file_by_id(p, body) : 0;
         uint32_t n, i;
         if (!f || f->slice_md5) return 0;
+        if ((bl - 16) / 20 > NN_PAR2_MAXSLICES) return 0;
         n = (uint32_t)((bl - 16) / 20);
+        f->nifsc = n;
         f->slice_md5 = (uint8_t (*)[16])malloc((n ? n : 1) * 16);
         f->slice_crc = (uint32_t *)malloc((n ? n : 1) * sizeof(uint32_t));
         if (!f->slice_md5 || !f->slice_crc) return NK_ENOMEM;
@@ -189,7 +243,7 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
     } else if (!memcmp(pk + 48, T_RECV, 16)) {
         NNPar2Rec *nr;
         uint32_t e, i;
-        if (bl < 4) return 0;
+        if (bl < 4 || (p->have_main && bl - 4 != p->slice)) return 0;
         e = le32(body);
         for (i = 0; i < p->nrec; i++)
             if (p->rec[i].exponent == e) return 0;      /* have it */
@@ -198,6 +252,8 @@ static int on_packet(NNPar2 *p, const char *path, long off, const uint8_t *pk, u
         p->rec = nr;
         nr[p->nrec].exponent = e;
         nr[p->nrec].offset = off + 68;
+        nr[p->nrec].len = bl - 4;
+        memcpy(nr[p->nrec].set_id, pk + 32, 16);
         nr[p->nrec].path = (char *)malloc(strlen(path) + 1);
         if (!nr[p->nrec].path) return NK_ENOMEM;
         strcpy(nr[p->nrec].path, path);
@@ -255,17 +311,14 @@ int nn_par2_load(NNPar2 *p, const char *path)
         off += (long)len;
     }
     fclose(f);
-    return p->have_main ? NK_OK : NK_EPROTO;
+    return p->have_main && !p->too_big ? NK_OK : NK_EPROTO;
 }
 
 void nn_par2_free(NNPar2 *p)
 {
     uint32_t i;
-    for (i = 0; i < p->nfiles; i++) {
-        free(p->files[i].slice_md5);
-        free(p->files[i].slice_crc);
-        free(p->files[i].bad);
-    }
+    for (i = 0; i < p->nfiles; i++)
+        free_file_data(&p->files[i]);
     for (i = 0; i < p->nrec; i++)
         free(p->rec[i].path);
     free(p->files);
@@ -335,7 +388,10 @@ static size_t read_slice(FILE *f, uint64_t slice, uint32_t k, uint64_t length, u
 uint32_t nn_par2_verify(NNPar2 *p, const char *dir)
 {
     uint32_t i, k, total = 0;
-    uint8_t *buf = (uint8_t *)malloc((size_t)p->slice ? (size_t)p->slice : 1);
+    uint8_t *buf;
+    if (p->too_big || p->slice > NN_PAR2_MAXSLICE)
+        return 0xffffffffu;
+    buf = (uint8_t *)malloc((size_t)p->slice ? (size_t)p->slice : 1);
     if (!buf) return 0xffffffffu;
     p->too_long = 0;
     for (i = 0; i < p->nfiles; i++) {
@@ -358,7 +414,7 @@ uint32_t nn_par2_verify(NNPar2 *p, const char *dir)
             flen = ftell(fp);
         for (k = 0; k < f->nslices; k++) {
             int ok = 0;
-            if (fp && f->slice_md5 && (uint64_t)flen >= (uint64_t)k * p->slice) {
+            if (fp && f->slice_md5 && k < f->nifsc && (uint64_t)flen >= (uint64_t)k * p->slice) {
                 uint8_t d[16];
                 NNMd5 m;
                 uint64_t want = f->length - (uint64_t)k * p->slice;
@@ -451,6 +507,8 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
     size_t words = (size_t)(p->slice / 2);
     int ret = NK_ENOMEM;
 
+    if (p->too_big || p->slice > NN_PAR2_MAXSLICE)
+        return NK_EPROTO;
     for (i = 0; i < p->nfiles; i++) {
         if (!p->files[i].name[0])
             return NK_EPROTO;        /* no file description: slices can't be placed */
@@ -462,9 +520,9 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
     }
     if (nmiss > p->nrec)
         return NK_EARG;
+    /* verify read <name>.part where there was no <name>: so does repair */
     for (i = 0; i < p->nfiles; i++)
-        if (p->files[i].damaged && p->files[i].name[0])
-            adopt_part(dir, p->files[i].name);
+        adopt_part(dir, p->files[i].name);
     miss = (uint32_t *)malloc(nmiss * sizeof(uint32_t));
     mat = (uint16_t *)malloc((size_t)nmiss * nmiss * sizeof(uint16_t));
     acc = (uint16_t **)calloc(nmiss, sizeof(uint16_t *));
@@ -519,7 +577,10 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
         path = join(dir, f->name);
         fp = path ? fopen(path, "rb") : 0;
         free(path);
-        if (!fp) continue;
+        if (!fp) {
+            ret = NK_EIO;       /* verify read its good slices: they must be there */
+            goto out;
+        }
         for (s = 0; s < f->nslices; s++) {
             if (f->bad[s]) continue;
             read_slice(fp, p->slice, s, f->length, buf);
@@ -589,6 +650,19 @@ int nn_par2_repair(NNPar2 *p, const char *dir)
                 buf[2 * w] = (uint8_t)acc[c][w];
                 buf[2 * w + 1] = (uint8_t)(acc[c][w] >> 8);
             }
+            /* a rebuilt slice is written only when its MD5 is right */
+            if (f->slice_md5 && s < f->nifsc) {
+                uint8_t d[16];
+                NNMd5 m;
+                nn_md5_init(&m);
+                nn_md5_update(&m, buf, (size_t)p->slice);
+                nn_md5_final(&m, d);
+                if (memcmp(d, f->slice_md5[s], 16)) {
+                    fclose(fp);
+                    ret = NK_EPROTO;
+                    goto out;
+                }
+            }
             n = f->length - at < p->slice ? f->length - at : p->slice;
             /* a missing file: fill up to here with zeros first (no seeking
              * past the end on AmigaDOS); good slices are written below */
@@ -644,10 +718,25 @@ truncate:
                 if (o) fclose(o);
                 fclose(in);
                 in = 0;
-                if (!left && remove(path) == 0 && rename(tmp, path) == 0)
-                    f->too_long = 0;
-                else
-                    remove(tmp);
+                /* the old file goes aside until the new one has its name,
+                 * so a crash leaves one of them under a name we know */
+                if (!left) {
+                    char *old = (char *)malloc(pl + 5);
+                    if (old) {
+                        memcpy(old, path, pl);
+                        memcpy(old + pl, ".old", 5);
+                        remove(old);
+                        if (rename(path, old) == 0) {
+                            if (rename(tmp, path) == 0) {
+                                remove(old);
+                                f->too_long = 0;
+                            } else
+                                rename(old, path);
+                        }
+                        free(old);
+                    }
+                }
+                remove(tmp);
             }
             if (in) fclose(in);
             free(tmp);

@@ -1,5 +1,10 @@
 /* Part file: assembles a binary from parts in any order, resumable.
  * MIT licence, (c) 2026 AmiCradle Team. */
+#if defined(__unix__) || defined(__APPLE__)
+#define _POSIX_C_SOURCE 200809L
+#include <unistd.h>
+#define HAVE_FSYNC 1
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +125,19 @@ NNPartFile *nn_pf_open(const char *final_path, uint64_t size, uint32_t nparts, i
     }
     fseek(pf->f, 0, SEEK_END);
     pf->fsize = (uint64_t)ftell(pf->f);
+    {
+        /* a record can outlive its data after a power cut: forget the
+         * parts that end past what the data file holds */
+        uint32_t i, k = 0;
+        memset(pf->bits, 0, (nparts + 7) / 8);
+        for (i = 0; i < pf->count; i++)
+            if (pf->held[i].off + pf->held[i].len <= pf->fsize) {
+                uint32_t p = pf->held[i].part;
+                pf->held[k++] = pf->held[i];
+                pf->bits[(p - 1) / 8] |= (uint8_t)(1u << ((p - 1) % 8));
+            }
+        pf->count = k;
+    }
     if (err)
         *err = NK_OK;
     return pf;
@@ -163,6 +181,10 @@ int nn_pf_commit(NNPartFile *pf, uint32_t part, uint64_t offset, uint64_t len, u
     /* the data is on disk before the record says so */
     if (fflush(pf->f) != 0)
         return NK_EIO;
+#ifdef HAVE_FSYNC
+    if (fsync(fileno(pf->f)) != 0)
+        return NK_EIO;
+#endif
     snprintf(rec, sizeof(rec), "p %lu %llu %llu %08lx", (unsigned long)part,
              (unsigned long long)offset, (unsigned long long)len, (unsigned long)crc);
     if (nk_journal_append(pf->j, rec, strlen(rec)) != NK_OK || nk_journal_sync(pf->j) != NK_OK)
@@ -269,6 +291,21 @@ int nn_pf_finish(NNPartFile *pf)
 const char *nn_pf_final(const NNPartFile *pf)
 {
     return pf->used ? pf->used : pf->final;
+}
+
+void nn_pf_discard(NNPartFile *pf)
+{
+    if (!pf)
+        return;
+    if (pf->f)
+        fclose(pf->f);
+    pf->f = 0;
+    if (pf->j)
+        nk_journal_close(pf->j);
+    pf->j = 0;
+    remove(pf->data_path);
+    remove(pf->state_path);
+    nn_pf_close(pf);
 }
 
 void nn_pf_close(NNPartFile *pf)

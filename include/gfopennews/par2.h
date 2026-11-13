@@ -37,6 +37,7 @@ typedef struct NNPar2File {
     uint32_t first;            /* index of its first slice in the whole set */
     uint8_t (*slice_md5)[16];  /* from the IFSC packet, or NULL if not seen */
     uint32_t *slice_crc;
+    uint32_t nifsc;            /* entries in slice_md5 and slice_crc */
     /* verify results */
     int      present;          /* the file could be opened */
     uint32_t damaged;          /* slices missing or wrong */
@@ -48,7 +49,12 @@ typedef struct NNPar2Rec {
     uint32_t exponent;
     char    *path;             /* which .par2 file holds it */
     long     offset;           /* where its data starts */
+    uint64_t len;              /* bytes of data in the packet (must be the slice size) */
+    uint8_t  set_id[16];       /* checked when the main packet arrives */
 } NNPar2Rec;
+
+#define NN_PAR2_MAXSLICE  (64ul << 20)  /* bytes in a slice we take */
+#define NN_PAR2_MAXSLICES 32768u        /* input slices in a set (the spec's limit) */
 
 typedef struct NNPar2 {
     uint8_t     set_id[16];
@@ -61,6 +67,7 @@ typedef struct NNPar2 {
     unsigned long bad_packets;  /* checksum failures (damaged .par2 data) */
     int         have_main;
     uint32_t    too_long;       /* files verify found too long (repair cuts) */
+    int         too_big;        /* the set breaks NN_PAR2_MAXSLICE(S): refused */
 } NNPar2;
 
 /* Reads every packet of one .par2 file into the set (call it for the index
