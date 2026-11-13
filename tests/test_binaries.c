@@ -297,6 +297,38 @@ int main(int argc, char **argv)
         remove(path);
     }
 
+    /* an article that claims a held part's range can't overwrite it
+     * (Franklin's repro on #3) */
+    {
+        NNPartFile *pf;
+        int e;
+        char t2[700];
+        FILE *f;
+        char got[8] = { 0 };
+        snprintf(tmp, sizeof(tmp), "%s/overlap.bin", dir);
+        remove(tmp);
+        snprintf(t2, sizeof(t2), "%s.part", tmp); remove(t2);
+        snprintf(t2, sizeof(t2), "%s.parts", tmp); remove(t2);
+        pf = nn_pf_open(tmp, 6, 2, &e);
+        CHECK(pf != 0);
+        if (pf) {
+            CHECK_EQ(nn_pf_write(pf, 1, 0, (const uint8_t *)"ABC", 3), NK_OK);
+            CHECK_EQ(nn_pf_put(pf, 0, (const uint8_t *)"XYZ", 3), NK_EARG);
+            CHECK_EQ(nn_pf_put(pf, 2, (const uint8_t *)"XY", 2), NK_EARG);   /* one byte over */
+            CHECK_EQ(nn_pf_write(pf, 2, 3, (const uint8_t *)"DEF", 3), NK_OK);
+            CHECK_EQ(nn_pf_finish(pf), NN_PF_DONE);
+            nn_pf_close(pf);
+        }
+        f = fopen(tmp, "rb");
+        CHECK(f != 0);
+        if (f) {
+            CHECK_EQ(fread(got, 1, 7, f), 6);
+            fclose(f);
+        }
+        CHECK(!strcmp(got, "ABCDEF"));
+        remove(tmp);
+    }
+
     /* UUencode */
     {
         NNUu u;

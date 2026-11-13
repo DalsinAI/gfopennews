@@ -324,7 +324,8 @@ int nn_nzb_parse(NNNzb *nzb, const char *xml, size_t len)
         size_t i, k, w;
         for (i = 0; i < nzb->nfiles; i++) {
             NNNzbFile *ff = &nzb->files[i];
-            qsort(ff->segs, ff->nsegs, sizeof(NNNzbSeg), seg_cmp);
+            if (ff->nsegs)
+                qsort(ff->segs, ff->nsegs, sizeof(NNNzbSeg), seg_cmp);
             for (k = 0, w = 0; k < ff->nsegs; k++) {
                 if (w && ff->segs[w - 1].number == ff->segs[k].number) {
                     free(ff->segs[k].msgid);
