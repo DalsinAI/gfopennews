@@ -86,6 +86,11 @@ void nn_b64_init(NNB64 *b, NNWriteFn write, void *user);
 int  nn_b64_line(NNB64 *b, const char *line, size_t len);   /* NK_OK or NK_EIO */
 
 /* ---- multi-part subjects --------------------------------------------------- */
+/* Cuts a name down to its last component (after any '/', '\\' or ':') and
+ * empties "." and "..". The subject, =ybegin and UU "begin" names all go
+ * through it, so a name from a post is never a path. */
+void nn_bin_safe_name(char *name);
+
 /* Finds the file name ("quoted", or the word before "yEnc") and the last
  * (n/m) or [n/m] in a subject. Answers 1 when a part count was found. */
 int nn_bin_subject(const char *subject, char *name, size_t name_cap,
@@ -107,6 +112,9 @@ enum {
     NN_PF_GAPS            /* all parts in, but they leave holes or overlap */
 };
 
+/* size must be under NN_PF_MAX (2 GB): the size comes from a post's
+ * headers, and fseek/ftell take a 32-bit long on the Amiga. NK_EARG else. */
+#define NN_PF_MAX 0x7fffffffu
 NNPartFile *nn_pf_open(const char *final_path, uint64_t size, uint32_t nparts, int *err);
 /* Writes one decoded part: data at offset (0-based). Marks it held once
  * written and synced. Parts already held are skipped (answers NK_OK). */
