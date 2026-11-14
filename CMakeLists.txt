@@ -64,6 +64,10 @@ if(Python3_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${NETKIT_DIR}/tests/fakes/fakeserv.py --run nntp,socks5 --
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
             $<TARGET_FILE:gfopennews-cli> ${CMAKE_CURRENT_BINARY_DIR})
+  # the fake server writes each posted article here, for test_cli.py to check
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/posted)
+  set_tests_properties(cli_fake_server PROPERTIES
+    ENVIRONMENT "NK_NNTP_POSTED=${CMAKE_CURRENT_BINARY_DIR}/posted")
   add_test(NAME queue_fake_servers
     COMMAND ${Python3_EXECUTABLE} ${NETKIT_DIR}/tests/fakes/fakeserv.py --run nntp,nntp2 --
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_queue.py
