@@ -31,7 +31,7 @@ TLS="$TLS" OUT="$OUT/netkit" sh "$NETKIT/build-amiga.sh"
 mkdir -p "$OUT/obj"
 OBJS=""
 for s in src/nntp.c src/newsrc.c src/overview.c src/decode.c src/partfile.c src/nzb.c \
-         src/queue.c src/md5.c src/par2.c src/path.c src/cli.c src/amiga/plat_amiga.c; do
+         src/queue.c src/md5.c src/par2.c src/path.c src/score.c src/cli.c src/amiga/plat_amiga.c; do
     o="$OUT/obj/$(basename "$s" .c).o"
     "$CC" $CFLAGS -c "$HERE/$s" -o "$o"
     OBJS="$OBJS $o"
