@@ -70,5 +70,13 @@ check(p.returncode == 0 and "comp.sys.amiga.misc" in p.stdout, "via SOCKS5: %r" 
 p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--user", "dale",
                     "--pass-env", "NEWS_PW", "groups"], capture_output=True, text=True, env=env, timeout=30)
 check(p.returncode == 2 and "without TLS" in p.stderr, "plain auth refused: %d %r" % (p.returncode, p.stderr))
+# --insecure counts as plain for a password, refused before connecting
+p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--tls", "--insecure", "--user", "dale",
+                    "--pass-env", "NEWS_PW", "groups"], capture_output=True, text=True, env=env, timeout=30)
+check(p.returncode == 2 and "certificate" in p.stderr, "--insecure auth refused: %d %r" % (p.returncode, p.stderr))
+# --tls on a build without TLS stops before connecting
+p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--tls", "--user", "dale",
+                    "--pass-env", "NEWS_PW", "groups"], capture_output=True, text=True, env=env, timeout=30)
+check(p.returncode == 1 and "no TLS" in p.stderr, "--tls refused: %d %r" % (p.returncode, p.stderr))
 print("cli tests: %d failed" % fails)
 sys.exit(1 if fails else 0)

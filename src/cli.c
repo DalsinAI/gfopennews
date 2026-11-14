@@ -12,16 +12,15 @@
  * After a queue run with damaged or missing files, the PAR2 index is read,
  * just enough paused recovery volumes are fetched, and the files repaired.
  * options: --server HOST --port N --user U --pass-env VAR --socks HOST:PORT
+ *          --tls (port 563 by default) --insecure (no certificate check)
  *          --allow-plain-auth (AUTHINFO without TLS: refused otherwise)
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
- * The password comes from an environment variable for now; with
- * gfopenkeys.library it comes from the keystore (entry nntp/HOST/USER).
- *
- * This file is the host build (POSIX sockets); the Amiga CLI with ReadArgs,
- * bsdsocket and gfopentls is the next step.
+ * The host build (plat_posix.c) has no TLS and takes the password from the
+ * variable --pass-env names. The Amiga build (amiga/plat_amiga.c) uses
+ * bsdsocket.library and gfopentls.library, and takes the password from
+ * gfopenkeys.library (entry nntp/HOST/USER); --pass-env does nothing there.
  * MIT licence, (c) 2026 AmiCradle Team. */
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +29,11 @@
 #include "gfopennews/overview.h"
 #include "gfopennews/queue.h"
 #include "gfopennews/par2.h"
-#include <dirent.h>
+#include "gfopennews/path.h"
+#include "plat.h"
+
+static NNPlatOpts plat;
+static int stopped;
 
 typedef struct {
     int  code;
@@ -55,11 +58,12 @@ static int wait_all(NNClient *c)
 {
     uint32_t tick = 0;
     while (nn_waiting(c)) {
-        struct pollfd p;
+        NKConn *conn = nn_conn(c);
         int r;
-        p.fd = nk_conn_fd(nn_conn(c));
-        p.events = POLLIN | (nk_conn_outq(nn_conn(c)) ? POLLOUT : 0);
-        poll(&p, 1, 1000);
+        if (nn_plat_wait(&conn, 1, 1000)) {
+            stopped = 1;
+            return NK_EIO;
+        }
         tick += 1000;
         if ((r = nn_pump(c, tick)) != NK_OK)
             return r;
@@ -130,42 +134,15 @@ static void usage(void);
 static const char *nn_cli_server;
 static int nn_cli_port;
 
-static NNClient *open_server(const char *server, int port, const char *socks,
-                             const char *user, const char *passenv)
+static NNClient *open_server(const char *server, int port, const char *user)
 {
     NKTransport t;
     NKConn *conn;
     NNClient *c;
     Reply r;
-    char line[600];
-    if (socks) {
-        char host[256];
-        const char *colon = strrchr(socks, ':');
-        NKSocks5 s;
-        int k;
-        if (!colon || (size_t)(colon - socks) >= sizeof(host)) { usage(); return 0; }
-        memcpy(host, socks, (size_t)(colon - socks));
-        host[colon - socks] = 0;
-        if (nk_posix_tcp(host, (uint16_t)atoi(colon + 1), &t) != NK_OK) {
-            fprintf(stderr, "cannot reach proxy %s\n", socks);
-            return 0;
-        }
-        nk_socks5_init(&s, server, (uint16_t)port, 0, 0);
-        while ((k = nk_socks5_step(&s, &t)) == NK_WOULDBLOCK) {
-            struct pollfd p;
-            p.fd = t.fd(t.ctx);
-            p.events = POLLIN;
-            poll(&p, 1, 1000);
-        }
-        if (k != 1) {
-            fprintf(stderr, "proxy: %s\n", nk_strerror(k));
-            nk_transport_close(&t);
-            return 0;
-        }
-    } else if (nk_posix_tcp(server, (uint16_t)port, &t) != NK_OK) {
-        fprintf(stderr, "cannot reach %s:%d\n", server, port);
+    char line[600], pw[512];
+    if (nn_plat_connect(&plat, server, port, &t) != NK_OK)
         return 0;
-    }
     conn = nk_conn_new(0, t, 0);
     memset(&r, 0, sizeof(r));
     c = nn_new(conn, on_done, &r);
@@ -176,14 +153,20 @@ static NNClient *open_server(const char *server, int port, const char *socks,
     }
     cmd(c, "MODE READER", NN_SINGLE, 0, 0, &r);
     if (user) {
-        const char *pw = passenv ? getenv(passenv) : 0;
         snprintf(line, sizeof(line), "AUTHINFO USER %s", user);
         if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
         if (r.code == 381) {
-            if (!pw) { fprintf(stderr, "password needed (--pass-env)\n"); goto fail; }
+            int k;
+            if (!nn_plat_password(&plat, server, user, pw, sizeof(pw))) {
+                fprintf(stderr, nn_plat_has_tls() ? "no password for nntp/%s/%s\n"
+                                                  : "password needed (--pass-env)\n", server, user);
+                goto fail;
+            }
             snprintf(line, sizeof(line), "AUTHINFO PASS %s", pw);
-            if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
+            wipe(pw, sizeof(pw));
+            k = cmd(c, line, NN_SINGLE, 0, 0, &r);
             wipe(line, sizeof(line));
+            if (k != NK_OK) goto fail;
         }
         if (r.code != 281) { fprintf(stderr, "login refused: %d %s\n", r.code, r.text); goto fail; }
     }
@@ -204,38 +187,36 @@ static const char *state_name(int st)
     }
 }
 
+typedef struct { NNPar2 *p; const char *dir, *base; size_t bl; } VolScan;
+static void take_volume(void *u, const char *name)
+{
+    VolScan *v = (VolScan *)u;
+    size_t nl = strlen(name);
+    char path[1024];
+    if (nl > v->bl + 6 && !strncmp(name, v->base, v->bl) && name[v->bl] == '.' &&
+        !strcmp(name + nl - 5, ".par2") && strcmp(name + v->bl, ".par2") &&
+        nn_path_join(v->dir, name, path, sizeof(path)) == NK_OK)
+        nn_par2_load(v->p, path);
+}
+
 /* Loads FILE.par2 and every FILE.*.par2 beside it. */
 static int par2_load_set(NNPar2 *p, const char *index, char *dir, size_t dirsz)
 {
-    const char *slash = strrchr(index, '/'), *base = slash ? slash + 1 : index;
-    size_t bl = strlen(base);
-    DIR *d;
-    struct dirent *de;
+    VolScan v;
+    size_t at;
     int r;
     memset(p, 0, sizeof(*p));
-    if (slash) {
-        size_t n = (size_t)(slash - index);
-        if (n >= dirsz) return NK_EARG;
-        memcpy(dir, index, n);
-        dir[n] = 0;
-    } else
-        snprintf(dir, dirsz, ".");
+    if (nn_path_dir(index, dir, dirsz, &at) != NK_OK)
+        return NK_EARG;
     if ((r = nn_par2_load(p, index)) != NK_OK)
         return r;
-    if (bl > 5 && !strcmp(base + bl - 5, ".par2"))
-        bl -= 5;
-    if ((d = opendir(dir)) == 0)
-        return NK_OK;
-    while ((de = readdir(d)) != 0) {
-        size_t nl = strlen(de->d_name);
-        char path[1024];
-        if (nl > bl + 6 && !strncmp(de->d_name, base, bl) && de->d_name[bl] == '.' &&
-            !strcmp(de->d_name + nl - 5, ".par2") && strcmp(de->d_name + bl, ".par2")) {
-            snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-            nn_par2_load(p, path);
-        }
-    }
-    closedir(d);
+    v.p = p;
+    v.dir = dir;
+    v.base = index + at;
+    v.bl = strlen(v.base);
+    if (v.bl > 5 && !strcmp(v.base + v.bl - 5, ".par2"))
+        v.bl -= 5;
+    nn_plat_list(dir, take_volume, &v);
     return NK_OK;
 }
 
@@ -348,8 +329,7 @@ static int queue_par2(NNQueue *q, const char *out_dir, int *asked)
 
 /* nzb FILE | resume: fetch over `conns` connections per server */
 static int run_queue(NNClient *first, int argc, char **argv, const char *server2,
-                     const char *socks, const char *user, const char *passenv,
-                     const char *out_dir, const char *queue_dir, long limit, int conns)
+                     const char *user, const char *out_dir, const char *queue_dir, long limit, int conns)
 {
     NNQueue *q;
     NNClient *cl[16];
@@ -377,7 +357,7 @@ static int run_queue(NNClient *first, int argc, char **argv, const char *server2
     cl[ncl] = first;
     nn_q_attach(q, cl[ncl++], 0, 2);
     for (k = 1; k < conns && ncl < 16; k++)
-        if ((cl[ncl] = open_server(nn_cli_server, nn_cli_port, socks, user, passenv)) != 0)
+        if ((cl[ncl] = open_server(nn_cli_server, nn_cli_port, user)) != 0)
             nn_q_attach(q, cl[ncl++], 0, 2);
     if (server2) {
         char host[256];
@@ -387,21 +367,22 @@ static int run_queue(NNClient *first, int argc, char **argv, const char *server2
         memcpy(host, server2, hl);
         host[hl] = 0;
         for (k = 0; k < conns && ncl < 16; k++)
-            if ((cl[ncl] = open_server(host, colon ? atoi(colon + 1) : 119, socks, user, passenv)) != 0)
+            if ((cl[ncl] = open_server(host, colon ? atoi(colon + 1) : plat.tls ? 563 : 119, user)) != 0)
                 nn_q_attach(q, cl[ncl++], 1, 2);
     }
     if (limit >= 0)
         nn_q_limit(q, limit);
 again:
     while (nn_q_step(q)) {
-        struct pollfd p[16];
-        for (k = 0; k < ncl; k++) {
-            p[k].fd = nk_conn_fd(nn_conn(cl[k]));
-            p[k].events = POLLIN | (nk_conn_outq(nn_conn(cl[k])) ? POLLOUT : 0);
-        }
+        NKConn *cn[16];
+        for (k = 0; k < ncl; k++)
+            cn[k] = nn_conn(cl[k]);
         if (!ncl)
             break;
-        poll(p, (nfds_t)ncl, 1000);
+        if (nn_plat_wait(cn, ncl, 1000)) {
+            stopped = 1;        /* the queue is on disk: "resume" carries on */
+            break;
+        }
         tick += 10;
         for (k = 0; k < ncl; k++)
             if (nn_pump(cl[k], tick) != NK_OK) {
@@ -410,7 +391,7 @@ again:
                 cl[k--] = cl[--ncl];
             }
     }
-    par2 = ncl && limit < 0 ? queue_par2(q, out_dir, &asked) : -1;
+    par2 = ncl && limit < 0 && !stopped ? queue_par2(q, out_dir, &asked) : -1;
     if (par2 == 1)
         goto again;
     for (i = 0; nn_q_info(q, i, &fi); i++) {
@@ -431,7 +412,8 @@ again:
 static void usage(void)
 {
     fputs("usage: gfopennews-cli [--server H] [--port N] [--user U] [--pass-env VAR]\n"
-          "       [--socks H:P] [--newsrc FILE] [--cache DIR]\n"
+          "       [--socks H:P] [--tls] [--insecure] [--allow-plain-auth]\n"
+          "       [--newsrc FILE] [--cache DIR]\n"
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
           "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
           "       | nzb FILE.nzb | resume\n"
@@ -441,9 +423,9 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *server = "localhost", *user = 0, *passenv = 0, *socks = 0;
-    const char *newsrc = 0, *cache = ".", *server2 = 0, *out_dir = ".", *queue_dir = 0;
-    int port = 119, i, rc_dirty = 0, status = 0, conns = 2;
+    const char *server = "localhost", *user = 0;
+    const char *newsrc = 0, *cache = NN_PLAT_CURDIR, *server2 = 0, *out_dir = NN_PLAT_CURDIR, *queue_dir = 0;
+    int port = 0, i, rc_dirty = 0, status = 0, conns = 2;
     long limit = -1;
     int allow_plain = 0;
     NNNewsrc rc;
@@ -453,12 +435,14 @@ int main(int argc, char **argv)
 
     for (i = 1; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
         if (!strcmp(argv[i], "--allow-plain-auth")) { allow_plain = 1; continue; }
+        if (!strcmp(argv[i], "--tls")) { plat.tls = 1; continue; }
+        if (!strcmp(argv[i], "--insecure")) { plat.insecure = 1; continue; }
         if (i + 1 >= argc) { usage(); return 2; }
         if (!strcmp(argv[i], "--server")) server = argv[++i];
         else if (!strcmp(argv[i], "--port")) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--user")) user = argv[++i];
-        else if (!strcmp(argv[i], "--pass-env")) passenv = argv[++i];
-        else if (!strcmp(argv[i], "--socks")) socks = argv[++i];
+        else if (!strcmp(argv[i], "--pass-env")) plat.passenv = argv[++i];
+        else if (!strcmp(argv[i], "--socks")) plat.socks = argv[++i];
         else if (!strcmp(argv[i], "--newsrc")) newsrc = argv[++i];
         else if (!strcmp(argv[i], "--cache")) cache = argv[++i];
         else if (!strcmp(argv[i], "--server2")) server2 = argv[++i];
@@ -469,13 +453,20 @@ int main(int argc, char **argv)
         else { usage(); return 2; }
     }
     if (i >= argc) { usage(); return 2; }
-    /* this host build has no TLS: AUTHINFO would send the password in
-     * clear, so it needs --allow-plain-auth (Franklin's note on #1) */
-    if (user && !allow_plain && strcmp(argv[i], "par2") && strcmp(argv[i], "mark")) {
-        fputs("not sending a password over a connection without TLS "
-              "(--allow-plain-auth to do it anyway)\n", stderr);
+    /* AUTHINFO without TLS would send the password in clear: only with
+     * --allow-plain-auth (Franklin's note on #1). --insecure skips the
+     * certificate check, so a man in the middle could read it too: it
+     * counts as plain here. This runs before anything asks gfopenkeys. */
+    if (user && (!plat.tls || plat.insecure) && !allow_plain &&
+        strcmp(argv[i], "par2") && strcmp(argv[i], "mark")) {
+        fputs(plat.tls ? "not sending a password to a server whose certificate isn't checked "
+                         "(drop --insecure, or --allow-plain-auth to do it anyway)\n"
+                       : "not sending a password over a connection without TLS "
+                         "(--tls, or --allow-plain-auth to do it anyway)\n", stderr);
         return 2;
     }
+    if (!port)
+        port = plat.tls ? 563 : 119;
     nn_cli_server = server;
     nn_cli_port = port;
     nn_rc_init(&rc);
@@ -515,16 +506,24 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    c = open_server(server, port, socks, user, passenv);
+    if (!nn_plat_init(&plat)) {
+        nn_rc_free(&rc);
+        return 1;
+    }
+    c = open_server(server, port, user);
     if (!c) {
+        nn_plat_exit();
         nn_rc_free(&rc);
         return 1;
     }
     if (!strcmp(argv[i], "nzb") || !strcmp(argv[i], "resume")) {
-        status = run_queue(c, argc - i, argv + i, server2, socks, user, passenv,
+        status = run_queue(c, argc - i, argv + i, server2, user,
                            out_dir, queue_dir, limit, conns);
+        if (stopped)
+            fputs("stopped: \"resume\" carries on\n", stderr);
+        nn_plat_exit();
         nn_rc_free(&rc);
-        return status;
+        return stopped ? 1 : status;
     }
 
     if (!strcmp(argv[i], "groups") || !strcmp(argv[i], "unread")) {
@@ -590,10 +589,12 @@ int main(int argc, char **argv)
     if (rc_dirty && nn_rc_save(&rc, newsrc) != NK_OK)
         status = 1;
     nn_free(c);
+    nn_plat_exit();
     nn_rc_free(&rc);
     return status;
 fail:
     nn_free(c);
+    nn_plat_exit();
     nn_rc_free(&rc);
     return 1;
 }

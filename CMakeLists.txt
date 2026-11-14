@@ -12,7 +12,7 @@ set(NETKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfopennetkit" CACHE PATH "gfopenn
 add_subdirectory(${NETKIT_DIR} netkit)
 
 add_library(gfopennews_core STATIC src/nntp.c src/newsrc.c src/overview.c
-  src/decode.c src/partfile.c src/nzb.c src/queue.c src/md5.c src/par2.c src/ui_model.c)
+  src/decode.c src/partfile.c src/nzb.c src/queue.c src/md5.c src/par2.c src/path.c src/ui_model.c)
 target_include_directories(gfopennews_core PUBLIC include)
 target_link_libraries(gfopennews_core PUBLIC gfopennetkit)
 
@@ -32,12 +32,13 @@ else()
   message(STATUS "gfopenlayout not found at ${GFOPENLAYOUT_DIR}: the reader window and its test are left out")
 endif()
 
-add_executable(gfopennews-cli src/cli.c)
+add_executable(gfopennews-cli src/cli.c src/plat_posix.c)
+target_compile_definitions(gfopennews-cli PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(gfopennews-cli gfopennews_core)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
-foreach(t nntp newsrc overview binaries nzb queue_journal par2 ui_model)
+foreach(t nntp newsrc overview binaries nzb queue_journal par2 path ui_model)
   add_executable(test_${t} tests/test_${t}.c)
   target_link_libraries(test_${t} gfopennews_core)
   target_include_directories(test_${t} PRIVATE ${NETKIT_DIR}/tests)
@@ -50,6 +51,7 @@ add_test(NAME nzb COMMAND test_nzb)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/qj)
 add_test(NAME queue_journal COMMAND test_queue_journal ${CMAKE_CURRENT_BINARY_DIR}/qj)
 add_test(NAME par2 COMMAND test_par2 ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME path COMMAND test_path)
 add_test(NAME ui_model COMMAND test_ui_model)
 if(HAVE_OLUI)
   add_executable(test_ui_window tests/test_ui_window.c)
