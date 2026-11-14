@@ -20,6 +20,7 @@
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
  *          --from ADDRESS --subject TEXT (posting; followup makes "Re: ...")
+ *          --score FILE (headers: a score column, killed articles left out)
  * The host build (plat_posix.c) has no TLS and takes the password from the
  * variable --pass-env names. The Amiga build (amiga/plat_amiga.c) uses
  * bsdsocket.library and gfopentls.library, and takes the password from
@@ -35,6 +36,7 @@
 #include "gfopennews/par2.h"
 #include "gfopennews/path.h"
 #include "gfopennews/ui_model.h"
+#include "gfopennews/score.h"
 #include "plat.h"
 
 static NNPlatOpts plat;
@@ -120,11 +122,44 @@ static int take_over(void *u, const char *l, size_t n)
     h->n++;
     return 0;
 }
+typedef struct { const NNScore *score; const char *group; } OverCtx;
 static int print_over(void *u, const NNOver *ov)
 {
-    (void)u;
-    printf("%lu\t%s\t%s\n", (unsigned long)ov->number, ov->subject, ov->from);
+    OverCtx *o = (OverCtx *)u;
+    if (o && o->score) {
+        long sc = nn_score_of(o->score, o->group, ov);
+        if (nn_score_killed(sc))
+            return 0;
+        printf("%lu\t%ld\t%s\t%s\n", (unsigned long)ov->number, sc, ov->subject, ov->from);
+    } else
+        printf("%lu\t%s\t%s\n", (unsigned long)ov->number, ov->subject, ov->from);
     return 0;
+}
+
+/* Reads the kill and score file (at most 1 MB). NULL with the reason printed. */
+static NNScore *load_score(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char *t;
+    size_t n;
+    unsigned bad = 0;
+    NNScore *s;
+    if (!f) { fprintf(stderr, "cannot read %s\n", path); return 0; }
+    t = (char *)malloc((1u << 20) + 1);
+    n = t ? fread(t, 1, (1u << 20) + 1, f) : 0;
+    fclose(f);
+    if (!t || n > (1u << 20)) {
+        fprintf(stderr, "%s: too big\n", path);
+        free(t);
+        return 0;
+    }
+    s = nn_score_parse(t, n, &bad);
+    free(t);
+    if (!s) {
+        if (bad) fprintf(stderr, "%s: line %u is not a rule\n", path, bad);
+        else fprintf(stderr, "%s: too many rules (%u at most)\n", path, (unsigned)NN_SCORE_RULES);
+    }
+    return s;
 }
 
 
@@ -487,7 +522,7 @@ static void usage(void)
           "       [--socks H:P] [--tls] [--insecure] [--allow-plain-auth]\n"
           "       [--newsrc FILE] [--cache DIR]\n"
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
-          "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
+          "       [--score FILE] groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
           "       | nzb FILE.nzb | resume\n"
           "       | post GROUPS | followup GROUP N   (--from ADDRESS [--subject TEXT], text on stdin)\n"
           "       gfopennews-cli par2 verify|repair FILE.par2\n",
@@ -503,6 +538,7 @@ int main(int argc, char **argv)
     int allow_plain = 0;
     const char *from = 0, *subject = 0;
     char *body = 0;
+    const char *score_file = 0;
     NNNewsrc rc;
     NNClient *c;
     Reply r;
@@ -527,6 +563,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--conns")) conns = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--from")) from = argv[++i];
         else if (!strcmp(argv[i], "--subject")) subject = argv[++i];
+        else if (!strcmp(argv[i], "--score")) score_file = argv[++i];
         else { usage(); return 2; }
     }
     if (i >= argc) { usage(); return 2; }
@@ -693,7 +730,14 @@ int main(int argc, char **argv)
             nn_ov_flush(h.cache);
             nn_ov_close(h.cache);
         }
-        nn_ov_read(path, hi >= last ? hi - last + 1 : 0, hi, print_over, 0);
+        {
+            OverCtx oc;
+            oc.group = name;
+            oc.score = 0;
+            if (score_file && !(oc.score = load_score(score_file))) goto fail;
+            nn_ov_read(path, hi >= last ? hi - last + 1 : 0, hi, print_over, &oc);
+            nn_score_free((NNScore *)oc.score);
+        }
         cmd(c, "QUIT", NN_SINGLE, 0, 0, &r);
     } else if (!strcmp(argv[i], "article") && i + 2 < argc) {
         snprintf(line, sizeof(line), "GROUP %s", argv[i + 1]);

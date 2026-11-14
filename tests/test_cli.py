@@ -45,6 +45,20 @@ check(out.splitlines() == ["1\tRe: A1200 trapdoor\ta@b.example",
                            "2\tKickstart question\tc@d.example",
                            "3\t..dots at the start\te@f.example"], "headers: %r" % out)
 check(os.path.exists(os.path.join(cache, "comp.sys.amiga.misc.ov")), "cache written")
+# a kill and score file: article 2 killed, 1 and 3 scored
+score = os.path.join(work, "cli.score")
+with open(score, "w") as f:
+    f.write("[comp.sys.amiga.*]\nscore +50 subject: *trapdoor*\nkill subject: Kickstart*\n"
+            "[alt.*]\nscore +7 subject: *\n[*]\nscore -1 from: e@*\n")
+out = run("--score", score, "headers", "comp.sys.amiga.misc")
+check(out.splitlines() == ["1\t50\tRe: A1200 trapdoor\ta@b.example",
+                           "3\t-1\t..dots at the start\te@f.example"], "headers with --score: %r" % out)
+with open(score, "w") as f:
+    f.write("score +1 subject: x\nscore lots subject: y\n")
+p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--allow-plain-auth", "--user", "dale",
+                    "--pass-env", "NEWS_PW", "--cache", cache, "--score", score, "headers",
+                    "comp.sys.amiga.misc"], capture_output=True, text=True, env=env, timeout=30)
+check(p.returncode == 1 and "line 2 is not a rule" in p.stderr, "bad score file: %r" % p.stderr)
 out = run("headers", "comp.sys.amiga.misc", "2")         # from the cache
 check(out.splitlines()[0].startswith("2\t") and len(out.splitlines()) == 2, "last 2: %r" % out)
 out = run("article", "comp.sys.amiga.misc", "3")
