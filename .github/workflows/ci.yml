@@ -9,11 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # gfopennetkit at a fixed commit (netkit #5: the fake POST)
+      # gfopennetkit at a fixed commit (its main after #5: the fake POST)
       - uses: actions/checkout@v4
         with:
           repository: DalsinAI/gfopennetkit
-          ref: 561f365f2f5305911c6ed5e91e3d7a48691fbfdf
+          ref: e143b3f600c3b9ba2b8d63dd90c7202d0659ae14
           path: deps/gfopennetkit
       # gfopenlayout (its UI, olui) for the reader window, also at a fixed commit
       - uses: actions/checkout@v4
