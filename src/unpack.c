@@ -15,8 +15,13 @@ static void put(Buf *b, char c)
 static int quote(Buf *b, const char *v, int shell)
 {
     const unsigned char *s = (const unsigned char *)(v ? v : "");
-    for (; *s; s++)
+    for (; *s; s++) {
         if (*s < 0x20 || *s == 0x7f) return NK_EARG;
+        /* The AmigaDOS Shell acts on these even inside double quotes ($name and
+         * ${name} are variables, `...` a command run for its output) and "*"
+         * can't be trusted to stop it, so a value holding one is refused */
+        if (shell == NN_SHELL_AMIGADOS && (*s == '`' || *s == '$')) return NK_EARG;
+    }
     s = (const unsigned char *)(v ? v : "");
     if (shell == NN_SHELL_AMIGADOS) {
         put(b, '"');

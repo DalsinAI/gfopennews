@@ -31,6 +31,19 @@ int main(void)
     CHECK_EQ(nn_unpack_command("x %", "o", "", NN_SHELL_POSIX, o, sizeof(o)), NK_EARG);
     CHECK_EQ(nn_unpack_command("x %n", "o", "a\nreboot", NN_SHELL_POSIX, o, sizeof(o)), NK_EARG);
     CHECK_EQ(nn_unpack_command("x %d", "o\r", "", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    /* the AmigaDOS Shell runs `...` and fills in $name inside double quotes: refused there */
+    o[0] = 'z';
+    CHECK_EQ(nn_unpack_command("x %n", "", "x`Delete SYS:#? ALL`", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK(o[0] == 0);
+    CHECK_EQ(nn_unpack_command("x %n", "", "a$b", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK_EQ(nn_unpack_command("x %d", "${Kickstart}", "", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK_EQ(nn_unpack_command("x %n", "", "a\"b*c`d$e", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    /* in the POSIX single quotes both are plain text */
+    CHECK_EQ(nn_unpack_command("x %n", "", "a`b$c", NN_SHELL_POSIX, o, sizeof(o)), NK_OK);
+    CHECK(!strcmp(o, "x 'a`b$c'"));
+    /* the template is the user's own: a $ there is theirs to use */
+    CHECK_EQ(nn_unpack_command("x $DIR %n", "", "a", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_OK);
+    CHECK(!strcmp(o, "x $DIR \"a\""));
     CHECK_EQ(nn_unpack_command("x\ny", "o", "", NN_SHELL_POSIX, o, sizeof(o)), NK_EARG);
     CHECK_EQ(nn_unpack_command("x %n", "o", "a\x7f", NN_SHELL_POSIX, o, sizeof(o)), NK_EARG);
     CHECK_EQ(nn_unpack_command(0, "o", "", NN_SHELL_POSIX, o, sizeof(o)), NK_EARG);
