@@ -22,6 +22,7 @@
 #include <string.h>
 #include "gfopennetkit/netkit_amiga.h"
 #include "../plat.h"
+#include "gfopennews/unpack.h"
 
 static const char VERSTAG[] = "$VER: GFOpenNews 0.1 (13.11.2026)";
 
@@ -208,4 +209,14 @@ int nn_plat_list(const char *dir, void (*fn)(void *u, const char *name), void *u
     if (fib) FreeDosObject(DOS_FIB, fib);
     UnLock(lock);
     return NK_OK;
+}
+
+const int NN_PLAT_SHELL = NN_SHELL_AMIGADOS;
+
+int nn_plat_run(const char *line)
+{
+    LONG r;
+    fflush(stdout);
+    r = SystemTagList((CONST_STRPTR)line, NULL);
+    return r == -1 ? -1 : (int)r;
 }

@@ -16,6 +16,8 @@
  *          --allow-plain-auth (AUTHINFO without TLS: refused otherwise)
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
+ *          --unpack "COMMAND %d %n" (run when a queue run ends with every file
+ *          done: %d the output directory, %n the NZB's name, both quoted)
  * The host build (plat_posix.c) has no TLS and takes the password from the
  * variable --pass-env names. The Amiga build (amiga/plat_amiga.c) uses
  * bsdsocket.library and gfopentls.library, and takes the password from
@@ -30,6 +32,7 @@
 #include "gfopennews/queue.h"
 #include "gfopennews/par2.h"
 #include "gfopennews/path.h"
+#include "gfopennews/unpack.h"
 #include "plat.h"
 
 static NNPlatOpts plat;
@@ -329,7 +332,7 @@ static int queue_par2(NNQueue *q, const char *out_dir, int *asked)
 
 /* nzb FILE | resume: fetch over `conns` connections per server */
 static int run_queue(NNClient *first, int argc, char **argv, const char *server2,
-                     const char *user, const char *out_dir, const char *queue_dir, long limit, int conns)
+                     const char *user, const char *out_dir, const char *queue_dir, long limit, int conns, const char *unpack)
 {
     NNQueue *q;
     NNClient *cl[16];
@@ -402,6 +405,21 @@ again:
     }
     if (par2 >= 0)
         status = par2;
+    /* the external unpacker, only when every file is done */
+    if (unpack && status == 0 && !stopped && limit < 0) {
+        char name[256], line[2048];
+        int r;
+        nn_unpack_name(!strcmp(argv[0], "nzb") && argc > 1 ? argv[1] : "", name, sizeof(name));
+        if (nn_unpack_command(unpack, out_dir, name, NN_PLAT_SHELL, line, sizeof(line)) != NK_OK) {
+            fputs("unpack: the command can't be built (only %d, %n and %% may follow a %,"
+                  " and no control characters)\n", stderr);
+            status = 4;
+        } else if ((r = nn_plat_run(line)) != 0) {
+            printf("unpack: failed (%d)\n", r);
+            status = 4;
+        } else
+            printf("unpack: done\n");
+    }
     nn_q_compact(q);
     nn_q_close(q);
     for (k = 0; k < ncl; k++)
@@ -416,7 +434,7 @@ static void usage(void)
           "       [--newsrc FILE] [--cache DIR]\n"
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
           "       groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
-          "       | nzb FILE.nzb | resume\n"
+          "       | nzb FILE.nzb | resume   ([--unpack \"COMMAND %d %n\"])\n"
           "       gfopennews-cli par2 verify|repair FILE.par2\n",
           stderr);
 }
@@ -428,6 +446,7 @@ int main(int argc, char **argv)
     int port = 0, i, rc_dirty = 0, status = 0, conns = 2;
     long limit = -1;
     int allow_plain = 0;
+    const char *unpack = 0;
     NNNewsrc rc;
     NNClient *c;
     Reply r;
@@ -450,6 +469,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--queue")) queue_dir = argv[++i];
         else if (!strcmp(argv[i], "--limit")) limit = atol(argv[++i]);
         else if (!strcmp(argv[i], "--conns")) conns = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--unpack")) unpack = argv[++i];
         else { usage(); return 2; }
     }
     if (i >= argc) { usage(); return 2; }
@@ -518,7 +538,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[i], "nzb") || !strcmp(argv[i], "resume")) {
         status = run_queue(c, argc - i, argv + i, server2, user,
-                           out_dir, queue_dir, limit, conns);
+                           out_dir, queue_dir, limit, conns, unpack);
         if (stopped)
             fputs("stopped: \"resume\" carries on\n", stderr);
         nn_plat_exit();

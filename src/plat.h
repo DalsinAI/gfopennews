@@ -29,6 +29,12 @@ int  nn_plat_wait(NKConn *const *conns, int n, int ms);
 /* the password for nntp/<host>/<user> into buf; 1 found, 0 not */
 int  nn_plat_password(const NNPlatOpts *o, const char *host, const char *user,
                       char *buf, size_t cap);
+/* the shell the unpack hook's line is quoted for (NN_SHELL_POSIX or
+ * NN_SHELL_AMIGADOS, unpack.h) */
+extern const int NN_PLAT_SHELL;
+/* runs a command line through the system's shell; its return code, or -1
+ * when it could not be started */
+int  nn_plat_run(const char *line);
 /* calls fn for each name in dir ("" is the current directory) */
 int  nn_plat_list(const char *dir, void (*fn)(void *u, const char *name), void *u);
 
