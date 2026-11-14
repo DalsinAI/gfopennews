@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include "plat.h"
+#include "gfopennews/unpack.h"
 
 const char NN_PLAT_CURDIR[] = ".";
 
@@ -95,4 +97,15 @@ int nn_plat_list(const char *dir, void (*fn)(void *u, const char *name), void *u
             fn(u, de->d_name);
     closedir(d);
     return NK_OK;
+}
+
+const int NN_PLAT_SHELL = NN_SHELL_POSIX;
+
+int nn_plat_run(const char *line)
+{
+    int r;
+    fflush(stdout);
+    r = system(line);
+    if (r == -1) return -1;
+    return WIFEXITED(r) ? WEXITSTATUS(r) : -1;
 }

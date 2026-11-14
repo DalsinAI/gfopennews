@@ -20,6 +20,8 @@
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
  *          --from ADDRESS --subject TEXT (posting; followup makes "Re: ...")
+ *          --unpack "COMMAND %d %n" (run when a queue run ends with every file
+ *          done: %d the output directory, %n the NZB's name, both quoted)
  *          --score FILE (headers: a score column, killed articles left out)
  * The host build (plat_posix.c) has no TLS and takes the password from the
  * variable --pass-env names. The Amiga build (amiga/plat_amiga.c) uses
@@ -36,6 +38,7 @@
 #include "gfopennews/par2.h"
 #include "gfopennews/path.h"
 #include "gfopennews/ui_model.h"
+#include "gfopennews/unpack.h"
 #include "gfopennews/score.h"
 #include "plat.h"
 
@@ -369,7 +372,7 @@ static int queue_par2(NNQueue *q, const char *out_dir, int *asked)
 
 /* nzb FILE | resume: fetch over `conns` connections per server */
 static int run_queue(NNClient *first, int argc, char **argv, const char *server2,
-                     const char *user, const char *out_dir, const char *queue_dir, long limit, int conns)
+                     const char *user, const char *out_dir, const char *queue_dir, long limit, int conns, const char *unpack)
 {
     NNQueue *q;
     NNClient *cl[16];
@@ -442,6 +445,24 @@ again:
     }
     if (par2 >= 0)
         status = par2;
+    /* the external unpacker, only when every file is done */
+    if (unpack && status == 0 && !stopped && limit < 0) {
+        char name[256], line[2048];
+        int r;
+        nn_unpack_name(!strcmp(argv[0], "nzb") && argc > 1 ? argv[1] : "", name, sizeof(name));
+        if (nn_unpack_command(unpack, out_dir, name, NN_PLAT_SHELL, line, sizeof(line)) != NK_OK) {
+            fputs(NN_PLAT_SHELL == NN_SHELL_AMIGADOS
+                      ? "unpack: the command can't be built (only %d, %n and %% may follow a %,"
+                        " no control characters, and no ` $ \" or * in the directory or the NZB's name)\n"
+                      : "unpack: the command can't be built (only %d, %n and %% may follow a %,"
+                        " and no control characters)\n", stderr);
+            status = 4;
+        } else if ((r = nn_plat_run(line)) != 0) {
+            printf("unpack: failed (%d)\n", r);
+            status = 4;
+        } else
+            printf("unpack: done\n");
+    }
     nn_q_compact(q);
     nn_q_close(q);
     for (k = 0; k < ncl; k++)
@@ -523,7 +544,7 @@ static void usage(void)
           "       [--newsrc FILE] [--cache DIR]\n"
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
           "       [--score FILE] groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
-          "       | nzb FILE.nzb | resume\n"
+          "       | nzb FILE.nzb | resume   ([--unpack \"COMMAND %d %n\"])\n"
           "       | post GROUPS | followup GROUP N   (--from ADDRESS [--subject TEXT], text on stdin)\n"
           "       gfopennews-cli par2 verify|repair FILE.par2\n",
           stderr);
@@ -538,6 +559,7 @@ int main(int argc, char **argv)
     int allow_plain = 0;
     const char *from = 0, *subject = 0;
     char *body = 0;
+    const char *unpack = 0;
     const char *score_file = 0;
     NNNewsrc rc;
     NNClient *c;
@@ -563,6 +585,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--conns")) conns = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--from")) from = argv[++i];
         else if (!strcmp(argv[i], "--subject")) subject = argv[++i];
+        else if (!strcmp(argv[i], "--unpack")) unpack = argv[++i];
         else if (!strcmp(argv[i], "--score")) score_file = argv[++i];
         else { usage(); return 2; }
     }
@@ -658,7 +681,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[i], "nzb") || !strcmp(argv[i], "resume")) {
         status = run_queue(c, argc - i, argv + i, server2, user,
-                           out_dir, queue_dir, limit, conns);
+                           out_dir, queue_dir, limit, conns, unpack);
         if (stopped)
             fputs("stopped: \"resume\" carries on\n", stderr);
         nn_plat_exit();

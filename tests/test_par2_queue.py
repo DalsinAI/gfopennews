@@ -57,7 +57,8 @@ with open(path, "w") as f:
 
 env = dict(os.environ, NEWS_PW="s3cret")
 r = subprocess.run([cli, "--server", "127.0.0.1", "--port", p1, "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW",
-                    "--out", out, "nzb", path], capture_output=True, text=True, env=env, timeout=120)
+                    "--out", out, "--unpack", "ls %d > %d.list && echo %n > %d.name",
+                    "nzb", path], capture_output=True, text=True, env=env, timeout=120)
 lines = {l.split("\t")[0]: l.split("\t") for l in r.stdout.splitlines() if "\t" in l}
 check("par2: 6 damaged slices, 0 recovery blocks in" in r.stdout, "damage found: %r" % r.stdout)
 check("par2: repaired yes" in r.stdout, "repaired: %r %r" % (r.stdout, r.stderr))
@@ -70,5 +71,17 @@ for n, d in data.items():
     p = os.path.join(out, n)
     check(os.path.exists(p) and open(p, "rb").read() == d, "%s byte for byte" % n)
 
+# the unpack hook ran once every file was done, with the directory and name quoted
+check("unpack: done" in r.stdout, "unpack ran: %r" % r.stdout)
+listing = open(out + ".list").read().split() if os.path.exists(out + ".list") else []
+check("film.mkv" in listing and "notes.nfo" in listing, "unpack saw the files: %r" % listing)
+check(os.path.exists(out + ".name") and open(out + ".name").read() == "pq\n", "unpack got the NZB name")
+# a failing unpacker: exit 4, the files stay
+r = subprocess.run([cli, "--server", "127.0.0.1", "--port", p1, "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW",
+                    "--out", out, "--unpack", "false", "resume"], capture_output=True, text=True, env=env, timeout=120)
+check(r.returncode == 4 and "unpack: failed (1)" in r.stdout, "failing unpack: %d %r" % (r.returncode, r.stdout))
+r = subprocess.run([cli, "--server", "127.0.0.1", "--port", p1, "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW",
+                    "--out", out, "--unpack", "x %s", "resume"], capture_output=True, text=True, env=env, timeout=120)
+check(r.returncode == 4 and "can't be built" in r.stderr, "bad unpack template: %d %r" % (r.returncode, r.stderr))
 print("ok" if not fails else "%d failures" % fails)
 sys.exit(1 if fails else 0)
