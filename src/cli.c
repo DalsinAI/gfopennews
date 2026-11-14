@@ -8,6 +8,9 @@
  *   gfopennews-cli [options] mark GROUP LOW[-HIGH]      (needs --newsrc)
  *   gfopennews-cli [options] nzb FILE.nzb               (queue it and fetch)
  *   gfopennews-cli [options] resume                     (carry on the queue)
+ *   gfopennews-cli [options] post GROUP[,GROUP...]      (needs --from and --subject)
+ *   gfopennews-cli [options] followup GROUP NUMBER      (needs --from)
+ * post and followup read the article's text from standard input.
  *   gfopennews-cli par2 verify|repair FILE.par2         (no server needed)
  * After a queue run with damaged or missing files, the PAR2 index is read,
  * just enough paused recovery volumes are fetched, and the files repaired.
@@ -16,6 +19,7 @@
  *          --allow-plain-auth (AUTHINFO without TLS: refused otherwise)
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
+ *          --from ADDRESS --subject TEXT (posting; followup makes "Re: ...")
  *          --unpack "COMMAND %d %n" (run when a queue run ends with every file
  *          done: %d the output directory, %n the NZB's name, both quoted)
  *          --score FILE (headers: a score column, killed articles left out)
@@ -33,6 +37,7 @@
 #include "gfopennews/queue.h"
 #include "gfopennews/par2.h"
 #include "gfopennews/path.h"
+#include "gfopennews/ui_model.h"
 #include "gfopennews/unpack.h"
 #include "gfopennews/score.h"
 #include "plat.h"
@@ -446,8 +451,11 @@ again:
         int r;
         nn_unpack_name(!strcmp(argv[0], "nzb") && argc > 1 ? argv[1] : "", name, sizeof(name));
         if (nn_unpack_command(unpack, out_dir, name, NN_PLAT_SHELL, line, sizeof(line)) != NK_OK) {
-            fputs("unpack: the command can't be built (only %d, %n and %% may follow a %,"
-                  " and no control characters)\n", stderr);
+            fputs(NN_PLAT_SHELL == NN_SHELL_AMIGADOS
+                      ? "unpack: the command can't be built (only %d, %n and %% may follow a %,"
+                        " no control characters, and no ` $ \" or * in the directory or the NZB's name)\n"
+                      : "unpack: the command can't be built (only %d, %n and %% may follow a %,"
+                        " and no control characters)\n", stderr);
             status = 4;
         } else if ((r = nn_plat_run(line)) != 0) {
             printf("unpack: failed (%d)\n", r);
@@ -462,6 +470,73 @@ again:
     return status;
 }
 
+/* ---- posting (design step 4) ------------------------------------------------ */
+#define POST_MAX (256u << 10)   /* the text read from standard input */
+
+/* The article's text, or NULL (with the reason printed) when it is too big. */
+static char *read_body(void)
+{
+    char *b = (char *)malloc(POST_MAX + 1);
+    size_t n;
+    if (!b) return 0;
+    n = fread(b, 1, POST_MAX + 1, stdin);
+    if (n > POST_MAX) {
+        fprintf(stderr, "not posted: the text is over %u KB\n", POST_MAX >> 10);
+        free(b);
+        return 0;
+    }
+    b[n] = 0;
+    if (strlen(b) != n) {
+        fputs("not posted: the text holds a NUL byte\n", stderr);
+        free(b);
+        return 0;
+    }
+    return b;
+}
+
+/* the OVER line of the article answered to (only that number is taken,
+ * whatever else a server sends) */
+typedef struct { char buf[2048]; NNOver ov; uint32_t want; int got; } ParentCtx;
+static int take_parent(void *u, const char *l, size_t n)
+{
+    ParentCtx *p = (ParentCtx *)u;
+    /* parsed into p->buf; a line with another number is overwritten by the next */
+    if (!p->got && nn_parse_over(l, n, &p->ov, p->buf, sizeof(p->buf)) && p->ov.number == p->want)
+        p->got = 1;
+    return 0;
+}
+
+/* POST, the article, then the 240. 0 posted, 2 refused before sending
+ * (the reason printed), 1 refused by the server or a connection error. */
+static int post_article(NNClient *c, const NNPost *p, const char *body)
+{
+    char why[200];
+    size_t len;
+    char *art;
+    Reply r;
+    if (!nn_post_check(p, body, why, sizeof(why))) {
+        fprintf(stderr, "not posted: %s\n", why);
+        return 2;
+    }
+    len = nn_post_format(p, body, 0, 0);
+    if (!(art = (char *)malloc(len + 1))) return 1;
+    nn_post_format(p, body, art, len + 1);
+    if (cmd(c, "POST", NN_SINGLE, 0, 0, &r) != NK_OK || r.code != 340) {
+        fprintf(stderr, "not posted: %d %s\n", r.code, r.code == 440 ? "posting not allowed" : r.text);
+        free(art);
+        return 1;
+    }
+    memset(&r, 0, sizeof(r));
+    if (nn_send_article(c, art, len, on_done, &r) != NK_OK || wait_all(c) != NK_OK || r.code != 240) {
+        fprintf(stderr, "not posted: %d %s\n", r.code, r.text);
+        free(art);
+        return 1;
+    }
+    printf("posted: %s\n", r.text);
+    free(art);
+    return 0;
+}
+
 static void usage(void)
 {
     fputs("usage: gfopennews-cli [--server H] [--port N] [--user U] [--pass-env VAR]\n"
@@ -470,6 +545,7 @@ static void usage(void)
           "       [--out DIR] [--queue DIR] [--server2 H:P] [--conns N] [--limit N]\n"
           "       [--score FILE] groups | headers GROUP [LAST] | article GROUP N | unread | mark GROUP LO[-HI]\n"
           "       | nzb FILE.nzb | resume   ([--unpack \"COMMAND %d %n\"])\n"
+          "       | post GROUPS | followup GROUP N   (--from ADDRESS [--subject TEXT], text on stdin)\n"
           "       gfopennews-cli par2 verify|repair FILE.par2\n",
           stderr);
 }
@@ -481,6 +557,8 @@ int main(int argc, char **argv)
     int port = 0, i, rc_dirty = 0, status = 0, conns = 2;
     long limit = -1;
     int allow_plain = 0;
+    const char *from = 0, *subject = 0;
+    char *body = 0;
     const char *unpack = 0;
     const char *score_file = 0;
     NNNewsrc rc;
@@ -505,6 +583,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--queue")) queue_dir = argv[++i];
         else if (!strcmp(argv[i], "--limit")) limit = atol(argv[++i]);
         else if (!strcmp(argv[i], "--conns")) conns = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--from")) from = argv[++i];
+        else if (!strcmp(argv[i], "--subject")) subject = argv[++i];
         else if (!strcmp(argv[i], "--unpack")) unpack = argv[++i];
         else if (!strcmp(argv[i], "--score")) score_file = argv[++i];
         else { usage(); return 2; }
@@ -563,12 +643,38 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* post and followup: the text first, so a bad one never connects */
+    if (!strcmp(argv[i], "post") || !strcmp(argv[i], "followup")) {
+        int fu = !strcmp(argv[i], "followup");
+        if (i + 1 >= argc || (fu && i + 2 >= argc) || (!fu && !subject)) { usage(); nn_rc_free(&rc); return 2; }
+        if (!from) {
+            fputs("not posted: give your address with --from\n", stderr);
+            nn_rc_free(&rc);
+            return 2;
+        }
+        if (!(body = read_body())) { nn_rc_free(&rc); return 2; }
+        if (!fu) {
+            NNPost p;
+            char why[200];
+            nn_post_new(&p, argv[i + 1], from);
+            snprintf(p.subject, sizeof(p.subject), "%s", subject);
+            if (!nn_post_check(&p, body, why, sizeof(why))) {
+                fprintf(stderr, "not posted: %s\n", why);
+                free(body);
+                nn_rc_free(&rc);
+                return 2;
+            }
+        }
+    }
+
     if (!nn_plat_init(&plat)) {
+        free(body);
         nn_rc_free(&rc);
         return 1;
     }
     c = open_server(server, port, user);
     if (!c) {
+        free(body);
         nn_plat_exit();
         nn_rc_free(&rc);
         return 1;
@@ -583,7 +689,35 @@ int main(int argc, char **argv)
         return stopped ? 1 : status;
     }
 
-    if (!strcmp(argv[i], "groups") || !strcmp(argv[i], "unread")) {
+    if (!strcmp(argv[i], "post")) {
+        NNPost p;
+        nn_post_new(&p, argv[i + 1], from);
+        snprintf(p.subject, sizeof(p.subject), "%s", subject);
+        status = post_article(c, &p, body);
+        cmd(c, "QUIT", NN_SINGLE, 0, 0, &r);
+    } else if (!strcmp(argv[i], "followup")) {
+        ParentCtx pc;
+        NNPost p;
+        memset(&pc, 0, sizeof(pc));
+        pc.want = (uint32_t)strtoul(argv[i + 2], 0, 10);
+        snprintf(line, sizeof(line), "GROUP %s", argv[i + 1]);
+        if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK || r.code != 211) {
+            fprintf(stderr, "%d %s\n", r.code, r.text);
+            free(body);
+            goto fail;
+        }
+        snprintf(line, sizeof(line), "OVER %lu", strtoul(argv[i + 2], 0, 10));
+        if (cmd(c, line, NN_MULTI, take_parent, &pc, &r) != NK_OK || r.code != 224 || !pc.got) {
+            fprintf(stderr, "no article %s in %s\n", argv[i + 2], argv[i + 1]);
+            free(body);
+            goto fail;
+        }
+        nn_post_followup(&p, argv[i + 1], &pc.ov, from);
+        if (subject)
+            snprintf(p.subject, sizeof(p.subject), "%s", subject);
+        status = post_article(c, &p, body);
+        cmd(c, "QUIT", NN_SINGLE, 0, 0, &r);
+    } else if (!strcmp(argv[i], "groups") || !strcmp(argv[i], "unread")) {
         GroupsCtx g;
         int unread = !strcmp(argv[i], "unread");
         if (unread && !newsrc) { usage(); goto fail; }
@@ -650,6 +784,7 @@ int main(int argc, char **argv)
         usage();
         goto fail;
     }
+    free(body);
     if (rc_dirty && nn_rc_save(&rc, newsrc) != NK_OK)
         status = 1;
     nn_free(c);

@@ -92,5 +92,49 @@ check(p.returncode == 2 and "certificate" in p.stderr, "--insecure auth refused:
 p = subprocess.run([cli, "--server", "127.0.0.1", "--port", port, "--tls", "--user", "dale",
                     "--pass-env", "NEWS_PW", "groups"], capture_output=True, text=True, env=env, timeout=30)
 check(p.returncode == 1 and "no TLS" in p.stderr, "--tls refused: %d %r" % (p.returncode, p.stderr))
+# ---- posting: the fake server writes each article to NK_NNTP_POSTED ----
+posted = os.environ.get("NK_NNTP_POSTED")
+
+
+def post(args, text, ok=0):
+    base = [cli, "--server", "127.0.0.1", "--port", port, "--allow-plain-auth", "--user", "dale",
+            "--pass-env", "NEWS_PW"]
+    return subprocess.run(base + args, input=text, capture_output=True, text=True, env=env, timeout=30)
+
+
+def posted_text(p):
+    # "posted: article posted <postN@fake>"
+    n = p.stdout.split("<post")[1].split("@")[0]
+    with open(os.path.join(posted, n + ".art"), encoding="latin-1") as f:
+        return f.read()
+
+
+p = post(["--from", "k@example.invalid", "--subject", "Hello A1200", "post", "comp.sys.amiga.misc"],
+         "first line\n.starts with a dot\n\nlast\n")
+check(p.returncode == 0 and "posted: article posted <post" in p.stdout, "post: %r" % (p.stdout + p.stderr))
+if posted and p.returncode == 0:
+    check(posted_text(p) == "From: k@example.invalid\nNewsgroups: comp.sys.amiga.misc\n"
+          "Subject: Hello A1200\nUser-Agent: GFOpenNews\n\nfirst line\n.starts with a dot\n\nlast\n",
+          "post: article as sent")
+p = post(["--from", "k@example.invalid", "followup", "comp.sys.amiga.misc", "2"], "> quoted\nanswer")
+check(p.returncode == 0, "followup: %r" % (p.stdout + p.stderr))
+if posted and p.returncode == 0:
+    t = posted_text(p)
+    check("Subject: Re: Kickstart question\n" in t and "References: <1@fake> <2@fake>\n" in t
+          and t.endswith("\n\n> quoted\nanswer\n"), "followup: headers %r" % t)
+p = post(["--from", "k@example.invalid", "followup", "comp.sys.amiga.misc", "99"], "text")
+check(p.returncode == 1 and "no article 99" in p.stderr, "followup to a missing article: %r" % p.stderr)
+p = post(["--subject", "x", "post", "comp.sys.amiga.misc"], "text")
+check(p.returncode == 2 and "--from" in p.stderr, "post without --from: %r" % p.stderr)
+p = post(["--from", "k@example.invalid", "post", "comp.sys.amiga.misc"], "text")
+check(p.returncode == 2, "post without --subject: %d" % p.returncode)
+p = post(["--from", "k@example.invalid", "--subject", "x", "post", "Bad..name"], "text")
+check(p.returncode == 2 and "not a group name" in p.stderr, "bad group name: %r" % p.stderr)
+p = post(["--from", "k@example.invalid", "--subject", "x", "post", "comp.sys.amiga.misc"], " \n\n")
+check(p.returncode == 2 and "empty" in p.stderr, "empty article: %r" % p.stderr)
+p = post(["--from", "k@example.invalid", "--subject", "x", "post", "alt.no.such"], "text")
+check(p.returncode == 1 and "441" in p.stderr, "server refusal: %r" % p.stderr)
+p = post(["--from", "k@example.invalid", "--subject", "x\r\nX-Evil: 1", "post", "comp.sys.amiga.misc"], "text")
+check(p.returncode == 2 and "line break" in p.stderr, "header injection: %r" % p.stderr)
 print("cli tests: %d failed" % fails)
 sys.exit(1 if fails else 0)
