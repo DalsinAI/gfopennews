@@ -18,13 +18,13 @@ extern "C" {
 #endif
 
 enum { NN_SHELL_POSIX = 0,      /* sh: '...', with ' as '\'' */
-       NN_SHELL_AMIGADOS = 1 }; /* AmigaDOS: "...", with " as *" and * as **;
-                                 * a value with ` or $ is refused (the Shell
-                                 * acts on both inside quotes) */
+       NN_SHELL_AMIGADOS = 1 }; /* AmigaDOS: "..."; a value holding ` $ " or *
+                                 * is refused (the Shell acts on ` and $ inside
+                                 * quotes, and nothing is escaped) */
 
 /* Builds the command line into out. NK_OK; NK_EARG for a % other than
  * %d, %n or %%, a control character in a value (no newline can split
- * the line into two commands), or for AmigaDOS a ` or $ in a value;
+ * the line into two commands), or for AmigaDOS a ` $ " or * in a value;
  * NK_ETOOLONG when it does not fit. */
 int nn_unpack_command(const char *tmpl, const char *dir, const char *name, int shell,
                       char *out, size_t cap);

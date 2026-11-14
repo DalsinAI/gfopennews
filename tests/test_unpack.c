@@ -16,8 +16,14 @@ int main(void)
     /* quotes inside the values cannot end the quoting */
     CHECK_EQ(nn_unpack_command("x %n", "", "it's; rm -rf ~", NN_SHELL_POSIX, o, sizeof(o)), NK_OK);
     CHECK(!strcmp(o, "x 'it'\\''s; rm -rf ~'"));
-    CHECK_EQ(nn_unpack_command("x %n", "", "a\"b*c", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_OK);
-    CHECK(!strcmp(o, "x \"a*\"b**c\""));
+    /* AmigaDOS: a quote or a star in a value is refused, never escaped */
+    CHECK_EQ(nn_unpack_command("x %n", "", "a\"b", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK_EQ(nn_unpack_command("x %n", "", "a*b", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK_EQ(nn_unpack_command("x %d", "DH1:a\" Delete SYS:#? ALL \"", "", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    CHECK_EQ(nn_unpack_command("x %n", "", "*N*E[0m", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_EARG);
+    /* what a release name holds otherwise passes as it is */
+    CHECK_EQ(nn_unpack_command("x %n", "", "Some.Show-S01E02 (2026) [x264]; & | > #?", NN_SHELL_AMIGADOS, o, sizeof(o)), NK_OK);
+    CHECK(!strcmp(o, "x \"Some.Show-S01E02 (2026) [x264]; & | > #?\""));
     CHECK_EQ(nn_unpack_command("x %d", 0, 0, NN_SHELL_POSIX, o, sizeof(o)), NK_OK);   /* NULL as "" */
     CHECK(!strcmp(o, "x ''"));
 

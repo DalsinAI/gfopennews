@@ -17,18 +17,17 @@ static int quote(Buf *b, const char *v, int shell)
     const unsigned char *s = (const unsigned char *)(v ? v : "");
     for (; *s; s++) {
         if (*s < 0x20 || *s == 0x7f) return NK_EARG;
-        /* The AmigaDOS Shell acts on these even inside double quotes ($name and
-         * ${name} are variables, `...` a command run for its output) and "*"
-         * can't be trusted to stop it, so a value holding one is refused */
-        if (shell == NN_SHELL_AMIGADOS && (*s == '`' || *s == '$')) return NK_EARG;
+        /* The AmigaDOS Shell acts on ` and $ even inside double quotes ($name
+         * and ${name} are variables, `...` a command run for its output), and
+         * its "*" escape is the Shell's to read, not ours to trust: a value
+         * holding any of ` $ " * is refused, so nothing in it is ever escaped */
+        if (shell == NN_SHELL_AMIGADOS && (*s == '`' || *s == '$' || *s == '"' || *s == '*')) return NK_EARG;
     }
     s = (const unsigned char *)(v ? v : "");
     if (shell == NN_SHELL_AMIGADOS) {
         put(b, '"');
-        for (; *s; s++) {
-            if (*s == '"' || *s == '*') put(b, '*');
+        for (; *s; s++)
             put(b, (char)*s);
-        }
         put(b, '"');
     } else {
         put(b, '\'');
