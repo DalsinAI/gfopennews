@@ -12,6 +12,7 @@
  * After a queue run with damaged or missing files, the PAR2 index is read,
  * just enough paused recovery volumes are fetched, and the files repaired.
  * options: --server HOST --port N --user U --pass-env VAR --socks HOST:PORT
+ *          --allow-plain-auth (AUTHINFO without TLS: refused otherwise)
  *          --newsrc FILE --cache DIR --out DIR --queue DIR --server2 HOST:PORT
  *          --conns N (per server) --limit N (stop after N segments)
  * The password comes from an environment variable for now; with
@@ -118,6 +119,13 @@ static int print_over(void *u, const NNOver *ov)
 }
 
 
+/* a store the compiler can't drop, for buffers that held a password */
+static void wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
+
 static void usage(void);
 static const char *nn_cli_server;
 static int nn_cli_port;
@@ -175,7 +183,7 @@ static NNClient *open_server(const char *server, int port, const char *socks,
             if (!pw) { fprintf(stderr, "password needed (--pass-env)\n"); goto fail; }
             snprintf(line, sizeof(line), "AUTHINFO PASS %s", pw);
             if (cmd(c, line, NN_SINGLE, 0, 0, &r) != NK_OK) goto fail;
-            memset(line, 0, sizeof(line));
+            wipe(line, sizeof(line));
         }
         if (r.code != 281) { fprintf(stderr, "login refused: %d %s\n", r.code, r.text); goto fail; }
     }
@@ -437,12 +445,14 @@ int main(int argc, char **argv)
     const char *newsrc = 0, *cache = ".", *server2 = 0, *out_dir = ".", *queue_dir = 0;
     int port = 119, i, rc_dirty = 0, status = 0, conns = 2;
     long limit = -1;
+    int allow_plain = 0;
     NNNewsrc rc;
     NNClient *c;
     Reply r;
     char line[600];
 
     for (i = 1; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
+        if (!strcmp(argv[i], "--allow-plain-auth")) { allow_plain = 1; continue; }
         if (i + 1 >= argc) { usage(); return 2; }
         if (!strcmp(argv[i], "--server")) server = argv[++i];
         else if (!strcmp(argv[i], "--port")) port = atoi(argv[++i]);
@@ -459,6 +469,13 @@ int main(int argc, char **argv)
         else { usage(); return 2; }
     }
     if (i >= argc) { usage(); return 2; }
+    /* this host build has no TLS: AUTHINFO would send the password in
+     * clear, so it needs --allow-plain-auth (Franklin's note on #1) */
+    if (user && !allow_plain && strcmp(argv[i], "par2") && strcmp(argv[i], "mark")) {
+        fputs("not sending a password over a connection without TLS "
+              "(--allow-plain-auth to do it anyway)\n", stderr);
+        return 2;
+    }
     nn_cli_server = server;
     nn_cli_port = port;
     nn_rc_init(&rc);

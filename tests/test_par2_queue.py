@@ -56,7 +56,7 @@ with open(path, "w") as f:
     f.write('<?xml version="1.0"?><nzb>' + nzb + "</nzb>")
 
 env = dict(os.environ, NEWS_PW="s3cret")
-r = subprocess.run([cli, "--server", "127.0.0.1", "--port", p1, "--user", "dale", "--pass-env", "NEWS_PW",
+r = subprocess.run([cli, "--server", "127.0.0.1", "--port", p1, "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW",
                     "--out", out, "nzb", path], capture_output=True, text=True, env=env, timeout=120)
 lines = {l.split("\t")[0]: l.split("\t") for l in r.stdout.splitlines() if "\t" in l}
 check("par2: 6 damaged slices, 0 recovery blocks in" in r.stdout, "damage found: %r" % r.stdout)

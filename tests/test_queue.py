@@ -61,7 +61,7 @@ with open(nzb, "w") as f:
 
 env = dict(os.environ, NEWS_PW="s3cret")
 base = [cli, "--server", "127.0.0.1", "--port", p1, "--server2", "127.0.0.1:" + p2,
-        "--user", "dale", "--pass-env", "NEWS_PW", "--out", out, "--conns", "2"]
+        "--allow-plain-auth", "--user", "dale", "--pass-env", "NEWS_PW", "--out", out, "--conns", "2"]
 r = subprocess.run(base + ["--limit", "3", "nzb", nzb], capture_output=True, text=True, env=env, timeout=60)
 check("added 5 files" in r.stdout, "added: %r %r" % (r.stdout, r.stderr))
 check(not os.path.exists(os.path.join(out, "amiga demo.lha")), "not finished after 3 segments")
