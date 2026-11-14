@@ -454,10 +454,15 @@ int main(int argc, char **argv)
     }
     if (i >= argc) { usage(); return 2; }
     /* AUTHINFO without TLS would send the password in clear: only with
-     * --allow-plain-auth (Franklin's note on #1) */
-    if (user && !plat.tls && !allow_plain && strcmp(argv[i], "par2") && strcmp(argv[i], "mark")) {
-        fputs("not sending a password over a connection without TLS "
-              "(--tls, or --allow-plain-auth to do it anyway)\n", stderr);
+     * --allow-plain-auth (Franklin's note on #1). --insecure skips the
+     * certificate check, so a man in the middle could read it too: it
+     * counts as plain here. This runs before anything asks gfopenkeys. */
+    if (user && (!plat.tls || plat.insecure) && !allow_plain &&
+        strcmp(argv[i], "par2") && strcmp(argv[i], "mark")) {
+        fputs(plat.tls ? "not sending a password to a server whose certificate isn't checked "
+                         "(drop --insecure, or --allow-plain-auth to do it anyway)\n"
+                       : "not sending a password over a connection without TLS "
+                         "(--tls, or --allow-plain-auth to do it anyway)\n", stderr);
         return 2;
     }
     if (!port)
